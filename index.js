@@ -495,13 +495,86 @@ io.on('connection', (socket) => {
 // ... (success, failure, pending)
 
 // --- Ruta del Webhook (Notificaciones IPN de Mercado Pago) ---
-app.post('/api/payments/webhook', (req, res) => { // <-- ¡ESTA RUTA DEBE EXISTIR Y SER POST!
+// --- Ruta del Webhook (Notificaciones IPN de Mercado Pago) ---
+app.post('/api/payments/webhook', async (req, res) => { // <-- Asegúrate de que sea 'async'
     console.log("Webhook de Mercado Pago recibido:", req.query);
     console.log("Cuerpo del Webhook:", req.body);
-    // Aquí implementaremos la lógica para procesar el pago.
-    res.status(200).send('Webhook recibido exitosamente'); // Siempre responder con 200 OK
-});
 
+    const topic = req.query.topic || req.query.type; // 'topic' o 'type' para saber el tipo de notificación
+    const paymentId = req.body.data ? req.body.data.id : null; // El ID del pago
+
+    if (!paymentId || topic !== 'payment') {
+        console.log("Webhook no es de pago o ID de pago faltante. Ignorando.");
+        return res.status(200).send('OK'); // Siempre responder 200 OK
+    }
+
+    try {
+        // 1. Obtener detalles del pago de Mercado Pago usando el ID del pago
+        // Necesitas el Access Token para esta llamada
+        const mpPaymentResponse = await mercadopago.payment.findById(paymentId);
+        const payment = mpPaymentResponse.body;
+
+        console.log("Detalles del Pago obtenidos de MP:", JSON.stringify(payment, null, 2));
+
+        // Extraer external_reference para encontrar tu registro
+        const externalReference = payment.external_reference;
+        if (!externalReference) {
+            console.warn("Referencia externa faltante en el pago:", paymentId);
+            return res.status(200).send('OK');
+        }
+
+        const [gameId, userId] = externalReference.split('-');
+
+        if (!gameId || !userId) {
+            console.warn("Formato de referencia externa inválido:", externalReference);
+            return res.status(200).send('OK');
+        }
+
+        // 2. Procesar el estado del pago
+        if (payment.status === 'approved') {
+            // El pago fue aprobado
+            console.log(`Pago ${paymentId} APROBADO para gameId: ${gameId}, userId: ${userId}`);
+
+            // 2.1. Actualizar el estado del participante en la base de datos a 'COMPLETED'
+            await pool.query(
+                `UPDATE game_participants SET payment_status = 'COMPLETED', is_winner = FALSE
+                 WHERE game_id = $1 AND user_id = $2 AND payment_status = 'PENDING'`,
+                [gameId, userId]
+            );
+
+            // 2.2. Incrementar el contador de jugadores en la tabla 'games'
+            await pool.query(
+                `UPDATE games SET current_players = current_players + 1
+                 WHERE id = $1`,
+                [gameId]
+            );
+            console.log(`Participante ${userId} en juego ${gameId} actualizado a COMPLETED y contador de jugadores incrementado.`);
+
+            // Opcional: Notificar a los usuarios en tiempo real via Socket.IO
+            io.to(gameId).emit('playerJoined', { userId, gameId, status: 'approved' });
+
+        } else if (payment.status === 'rejected') {
+            // El pago fue rechazado
+            console.log(`Pago ${paymentId} RECHAZADO para gameId: ${gameId}, userId: ${userId}`);
+            await pool.query(
+                `UPDATE game_participants SET payment_status = 'REJECTED'
+                 WHERE game_id = $1 AND user_id = $2 AND payment_status = 'PENDING'`,
+                [gameId, userId]
+            );
+            console.log(`Participante ${userId} en juego ${gameId} actualizado a REJECTED.`);
+
+        } else if (payment.status === 'pending') {
+            // El pago está pendiente (no es necesario hacer nada extra si ya está en PENDING en DB)
+            console.log(`Pago ${paymentId} PENDIENTE para gameId: ${gameId}, userId: ${userId}`);
+        }
+
+        res.status(200).send('Webhook procesado exitosamente');
+
+    } catch (error) {
+        console.error('Error al procesar el webhook de Mercado Pago:', error);
+        res.status(500).send('Error interno del servidor al procesar el webhook'); // En caso de error, responder 500
+    }
+});
 // --- Programación de Tareas Diarias (Node-Cron) ---
 
 // Tarea para crear las partidas de hoy y mañana al iniciar el servidor
