@@ -492,21 +492,15 @@ io.on('connection', (socket) => {
 
 
 // --- Rutas de Retorno de Mercado Pago (para el navegador del usuario) ---
-app.get('/api/payments/success', (req, res) => {
-    console.log("Pago exitoso en MP:", req.query);
-    res.send('¡Pago de inscripción exitoso! Gracias por participar. Puedes cerrar esta ventana.');
-});
+// ... (success, failure, pending)
 
-app.get('/api/payments/failure', (req, res) => {
-    console.log("Pago fallido en MP:", req.query);
-    res.send('El pago de inscripción falló. Por favor, inténtalo de nuevo.');
+// --- Ruta del Webhook (Notificaciones IPN de Mercado Pago) ---
+app.post('/api/payments/webhook', (req, res) => { // <-- ¡ESTA RUTA DEBE EXISTIR Y SER POST!
+    console.log("Webhook de Mercado Pago recibido:", req.query);
+    console.log("Cuerpo del Webhook:", req.body);
+    // Aquí implementaremos la lógica para procesar el pago.
+    res.status(200).send('Webhook recibido exitosamente'); // Siempre responder con 200 OK
 });
-
-app.get('/api/payments/pending', (req, res) => {
-    console.log("Pago pendiente en MP:", req.query);
-    res.send('El pago de inscripción está pendiente de aprobación. Recibirás una notificación pronto.');
-});
-
 
 // --- Programación de Tareas Diarias (Node-Cron) ---
 
