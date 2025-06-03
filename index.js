@@ -42,18 +42,14 @@ const ENTRY_FEE = 10.00; // Costo de entrada a cada partida
 // --- Configuración de Mercado Pago ---
 // Crea una instancia del cliente de Mercado Pago con tu Access Token
 const client = new mercadopago.MercadoPagoConfig({
-    accessToken: process.env.MP_ACCESS_TOKEN,
+    accessToken: process.env.MP_ACCESS_TOKEN, // ¡Asegúrate de que este token sea correcto y activo en MP!
     options: {
-        timeout: 15000, // Timeout para las peticiones (5 segundos)
+        timeout: 15000, // Timeout para las peticiones (15 segundos)
     },
-    debug: true, // Habilita el modo debug del SDK
-    // ¡FORZAR AMBIENTE DE SANDBOX USANDO LA BASE URL!
-    // Para usar credenciales de producción con usuarios de prueba.
-    // Este es el ajuste clave para la "inconsistencia" que Mercado Pago mencionó.
-    // La URL de API de Sandbox es diferente.
-    baseUrl: "https://api.mercadopago.com/checkout/preferences", // <--- ¡ESTA ES LA LÍNEA CLAVE!
+    debug: true, // Habilita el modo debug del SDK para ver más información en consola
+    // ¡ELIMINAR BASEURL si ya tienes credenciales TEST-!
+    // baseUrl: "https://api.mercadopago.com/checkout/preferences", // <--- ¡ESTA LÍNEA SE ELIMINA!
 });
-// --- Fin Configuración de Mercado Pago ---
 // --- Fin Configuración de Mercado Pago ---
 
 
@@ -318,16 +314,15 @@ app.get('/api/games', authenticateToken, async (req, res) => {
 // Ruta para que un usuario se registre en una partida
 app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
     const gameId = req.params.gameId;
-  // ... (dentro de la ruta app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => { ... ))
+    const userId = req.user.id; // Obtenemos el ID del usuario del token JWT
+    const username = req.user.username; // Obtenemos el username del token para Mercado Pago
+    const userEmail = req.user.email; // Obtenemos el email del token para Mercado Pago
 
-    const userId = req.user.id;
-    const username = req.user.username;
-    const userEmail = req.user.email;
-
+    // Obtiene la hora actual en la zona horaria de Argentina
     const now = DateTime.now().setZone("America/Argentina/Buenos_Aires");
 
     try { // <-- Inicio del try principal de la ruta
-        // 1. Obtener los detalles de la partida y validaciones iniciales
+        // 1. Obtener los detalles de la partida
         const gameResult = await pool.query('SELECT * FROM games WHERE id = $1', [gameId]);
         const game = gameResult.rows[0];
 
@@ -339,7 +334,7 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
         // Convierte las fechas de la BD a objetos Luxon para comparar en la misma zona horaria
         const regOpen = DateTime.fromJSDate(game.registration_open_at).setZone("America/Argentina/Buenos_Aires");
         const regClose = DateTime.fromJSDate(game.registration_close_at).setZone("America/Argentina/Buenos_Aires");
-        const scheduled = DateTime.fromJSDate(game.scheduled_time).setZone("America/Argentina/Buenos_Aires"); // <-- 'scheduled' AHORA ESTÁ DEFINIDA
+        const scheduled = DateTime.fromJSDate(game.scheduled_time).setZone("America/Argentina/Buenos_Aires");
 
         // --- NUEVOS CONSOLE.LOG DE DEPURACIÓN EN LA RUTA ---
         console.log(`\n--- DEBUG REGISTRO EN PARTIDA ${gameId} ---`);
@@ -348,7 +343,7 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
         console.log(`Reg Close (BD):         ${regClose.toISO()} (Local: ${regClose.toLocaleString(DateTime.DATETIME_FULL)})`);
         console.log(`Partida Inicia (scheduled): ${scheduled.toISO()} (Local: ${scheduled.toLocaleString(DateTime.DATETIME_FULL)})`);
         console.log(`Tipo de now: ${typeof now}, Tipo de regOpen: ${typeof regOpen}`);
-        console.log(`Valores Unix (ms): now=${now.toMillis()}, regOpen=${regOpen.toMillis()}`);
+        console.log(`Valores Unix (ms): now=<span class="math-inline">\{now\.toMillis\(\)\}, regOpen\=</span>{regOpen.toMillis()}`);
         console.log(`now < regOpen ? ${now < regOpen}`); // ¿Aún no abrió?
         console.log(`now > regClose ? ${now > regClose}`); // ¿Ya cerró?
         console.log(`now > scheduled ? ${now > scheduled}`); // ¿Ya empezó la partida?
@@ -395,7 +390,6 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
         const cardsJson = JSON.stringify(userBingoCards);
 
         // --- Lógica de Integración con Mercado Pago ---
-        // ¡MOVIDA AQUÍ DESPUÉS DE QUE 'scheduled' Y OTRAS VARIABLES ESTÉN DEFINIDAS!
         const preference = {
             items: [
                 {
@@ -406,33 +400,72 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
                 }
             ],
             payer: {
-                email: 'TESTUSER1180747306@testuser.com', // Ya corregido
-            },
-            external_reference: `${gameId}-${userId}`, // Ya corregido
-            back_urls: {
-                success: `${process.env.NGROK_URL}/api/payments/success`,
-                failure: `${process.env.NGROK_URL}/api/payments/failure`,
-                pending: `${process.env.NGROK_URL}/api/payments/pending`,
-            },
-            auto_return: "approved",
+    // ¡IMPORTANTE! Usa el email completo de tu COMPRADOR DE PRUEBA de Mercado Pago aquí
+    email: 'TESTUSER1180747306@testuser.com', // CORRECCIÓN: Agrega "@testuser.com"
+},
+            external_reference: `<span class="math-inline">\{gameId\}\-</span>{userId}`, // CORRECCIÓN: Usar template literal directamente
+           back_urls: {
+           success: `${process.env.NGROK_URL}/api/payments/success`, // <-- ¡AQUÍ ESTÁ LA CORRECCIÓN!
+           failure: `${process.env.NGROK_URL}/api/payments/failure`,
+           pending: `${process.env.NGROK_URL}/api/payments/pending`,
+           },
+            auto_return: "approved", // Redirige automáticamente al usuario si el pago es aprobado
+            // ¡IMPORTANTE! Esta URL DEBE SER PÚBLICA. Usa ngrok para pruebas locales.
             notification_url: `${process.env.NGROK_URL}/api/payments/webhook?source_news=webhooks`,
         };
 
         let mpResponse;
         try { // <-- Inicio del try para la llamada a Mercado Pago
-            const preferenceInstance = new mercadopago.Preference(client);
+            const preferenceInstance = new mercadopago.Preference(client); // CORRECTO: Usa mercadopago.Preference
             mpResponse = await preferenceInstance.create({ body: preference });
 
-            // ... (resto del código de depuración y manejo de respuesta de MP)
-        } catch (mpError) {
-            // ... (manejo de errores de MP)
-        }
+            // --- NUEVO CONSOLE.LOG PARA LA RESPUESTA DE MP ---
+            console.log(`\n--- DEBUG RESPUESTA MERCADO PAGO ---`);
+            console.log(`Status Code MP: ${mpResponse.statusCode}`); // Código HTTP de la respuesta de MP
+            console.log(`MP Response Body:`, JSON.stringify(mpResponse.body, null, 2)); // Contenido del body de MP
+            console.log(`MP Response Headers:`, JSON.stringify(mpResponse.headers, null, 2)); // Headers de la respuesta de MP
+            console.log(`------------------------------------\n`);
+            // --- FIN NUEVO CONSOLE.LOG ---
+
+            // Si mpResponse.body es null o undefined, esto aún fallará.
+            // Pero el log anterior nos mostrará lo que MP realmente envió.
+            const checkoutUrl = mpResponse.body ? mpResponse.body.init_point : null; // Acceso seguro
+            const preferenceId = mpResponse.body ? mpResponse.body.id : null; // Acceso seguro
+
+
+            // 4. Registrar al usuario en la partida con estado PENDING y los cartones
+            await pool.query(
+                `INSERT INTO game_participants (game_id, user_id, registration_time, payment_status, mp_preference_id, card_numbers)
+                 VALUES ($1, $2, $3, $4, $5, $6)`,
+                [gameId, userId, now.toJSDate(), 'PENDING', preferenceId, cardsJson]
+            );
+
+            res.status(200).json({
+                message: 'Redirige al usuario para completar el pago.',
+                checkoutUrl: checkoutUrl,
+                preferenceId: preferenceId
+            });
+
+        } catch (mpError) { // <-- Captura de errores de Mercado Pago
+            console.error('Error directo del SDK de Mercado Pago:', mpError);
+            // Si el error viene con una respuesta HTTP, puedes intentar acceder a ella
+            if (mpError.status_code) {
+                 console.error(`MP Error Status Code: ${mpError.status_code}`);
+            }
+            if (mpError.message && typeof mpError.message === 'object') {
+                 console.error(`MP Error Message Body:`, JSON.stringify(mpError.message, null, 2));
+            } else {
+                 console.error(`MP Error Message: ${mpError.message}`);
+            }
+            res.status(500).json({ message: 'Error interno del servidor al procesar el pago.', details: mpError.message || 'Error desconocido del SDK de MP.' });
+        } // <-- Cierre del catch de Mercado Pago
 
     } catch (error) { // <-- Captura de errores generales de la ruta
         console.error('Error general en la ruta de registro:', error);
         res.status(500).json({ message: 'Error interno del servidor durante el registro de partida.', details: error.message });
     }
 });
+
 
 // --- Lógica de Socket.IO (Comunicación en tiempo real) ---
 io.on('connection', (socket) => {
