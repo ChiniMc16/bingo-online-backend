@@ -513,6 +513,12 @@ app.get('/api/payments/pending', (req, res) => {
     res.send('El pago de inscripción está pendiente de aprobación. Recibirás una notificación pronto.');
 });
 
+app.post('/api/payments/webhook', (req, res) => { // <-- ¡ESTA RUTA DEBE EXISTIR Y SER POST!
+    console.log("Webhook de Mercado Pago recibido:", req.query);
+    console.log("Cuerpo del Webhook:", req.body);
+    // Aquí implementaremos la lógica para procesar el pago.
+    res.status(200).send('Webhook recibido exitosamente'); // Siempre responder con 200 OK
+});
 
 // --- Programación de Tareas Diarias (Node-Cron) ---
 
