@@ -47,8 +47,6 @@ const client = new mercadopago.MercadoPagoConfig({
         timeout: 15000, // Timeout para las peticiones (15 segundos)
     },
     debug: true, // Habilita el modo debug del SDK para ver más información en consola
-    // ¡ELIMINAR BASEURL si ya tienes credenciales TEST-!
-    // baseUrl: "https://api.mercadopago.com/checkout/preferences", // <--- ¡ESTA LÍNEA SE ELIMINA!
 });
 // --- Fin Configuración de Mercado Pago ---
 
@@ -428,12 +426,20 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
             // --- FIN NUEVO CONSOLE.LOG ---
 
             // Si mpResponse.body es null o undefined, esto aún fallará.
-            // Pero el log anterior nos mostrará lo que MP realmente envió.
-            const checkoutUrl = mpResponse.body ? mpResponse.body.init_point : null; // Acceso seguro
-            const preferenceId = mpResponse.body ? mpResponse.body.id : null; // Acceso seguro
+            // PERO si el 'create' lanza un error, el catch externo lo atrapará.
+            // Si llega aquí, significa que la llamada a MP no arrojó una excepción.
+            // AÚN ASÍ, debemos verificar que el 'body' contenga 'init_point'
+            if (!mpResponse || !mpResponse.body || !mpResponse.body.init_point) {
+                 // Si no hay body o init_point, forzar un error para ir al catch externo
+                 throw new Error("Mercado Pago no devolvió una URL de pago válida.");
+            }
+
+            const checkoutUrl = mpResponse.body.init_point;
+            const preferenceId = mpResponse.body.id;
 
 
             // 4. Registrar al usuario en la partida con estado PENDING y los cartones
+            //    ¡ESTA INSERCIÓN SOLO OCURRE SI LA PREFERENCIA DE MP SE CREÓ CON ÉXITO!
             await pool.query(
                 `INSERT INTO game_participants (game_id, user_id, registration_time, payment_status, mp_preference_id, card_numbers)
                  VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -446,8 +452,8 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
                 preferenceId: preferenceId
             });
 
-        } catch (mpError) { // <-- Captura de errores de Mercado Pago
-            console.error('Error directo del SDK de Mercado Pago:', mpError);
+        } catch (mpError) { // <-- Captura de errores directos del SDK de Mercado Pago
+            console.error('Error directo del SDK de Mercado Pago (pre_DB_insert):', mpError);
             // Si el error viene con una respuesta HTTP, puedes intentar acceder a ella
             if (mpError.status_code) {
                  console.error(`MP Error Status Code: ${mpError.status_code}`);
@@ -457,10 +463,10 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
             } else {
                  console.error(`MP Error Message: ${mpError.message}`);
             }
-            res.status(500).json({ message: 'Error interno del servidor al procesar el pago.', details: mpError.message || 'Error desconocido del SDK de MP.' });
-        } // <-- Cierre del catch de Mercado Pago
+            res.status(500).json({ message: 'Error al procesar el pago con Mercado Pago.', details: mpError.message || 'Error desconocido del SDK de MP.' });
+        }
 
-    } catch (error) { // <-- Captura de errores generales de la ruta
+    } catch (error) { // <-- Captura de errores generales de la ruta (DB, validaciones, etc.)
         console.error('Error general en la ruta de registro:', error);
         res.status(500).json({ message: 'Error interno del servidor durante el registro de partida.', details: error.message });
     }
@@ -492,45 +498,22 @@ io.on('connection', (socket) => {
 
 
 // --- Rutas de Retorno de Mercado Pago (para el navegador del usuario) ---
-// ... (success, failure, pending)
-
-// --- Ruta del Webhook (Notificaciones IPN de Mercado Pago) ---
-// --- Ruta del Webhook (Notificaciones IPN de Mercado Pago) ---
-app.post('/api/payments/webhook', async (req, res) => {
-    console.log("Webhook de Mercado Pago recibido:", req.query);
-    console.log("Cuerpo del Webhook:", req.body);
-
-    const topic = req.query.topic || req.query.type;
-    const paymentId = req.body.data ? req.body.data.id : null;
-
-    if (!paymentId || topic !== 'payment') {
-        console.log("Webhook no es de pago o ID de pago faltante. Ignorando.");
-        return res.status(200).send('OK');
-    }
-
-    try {
-        // --- DEBUG WEBHOOK ---
-        console.log(`DEBUG WEBHOOK: Intentando obtener detalles del pago ${paymentId}`);
-        console.log(`DEBUG WEBHOOK: Access Token usado: ${process.env.MP_ACCESS_TOKEN}`);
-        // --- FIN DEBUG WEBHOOK ---
-
-        // 1. Obtener detalles del pago de Mercado Pago usando el ID del pago
-        const mpPaymentResponse = await mercadopago.payment.findById(paymentId);
-        const payment = mpPaymentResponse.body;
-
-        // ... (resto del código del webhook)
-    } catch (error) {
-        console.error('Error al procesar el webhook de Mercado Pago:', error);
-        // Aquí deberíamos ver un error más específico si la llamada a findById falla
-        if (error.status_code) { // Si es un error de la API de MP
-            console.error(`MP Webhook Error Status Code: ${error.status_code}`);
-            console.error(`MP Webhook Error Body:`, JSON.stringify(error.message, null, 2));
-        } else {
-            console.error(`MP Webhook Error Message: ${error.message}`);
-        }
-        res.status(500).send('Error interno del servidor al procesar el webhook');
-    }
+app.get('/api/payments/success', (req, res) => {
+    console.log("Pago exitoso en MP:", req.query);
+    res.send('¡Pago de inscripción exitoso! Gracias por participar. Puedes cerrar esta ventana.');
 });
+
+app.get('/api/payments/failure', (req, res) => {
+    console.log("Pago fallido en MP:", req.query);
+    res.send('El pago de inscripción falló. Por favor, inténtalo de nuevo.');
+});
+
+app.get('/api/payments/pending', (req, res) => {
+    console.log("Pago pendiente en MP:", req.query);
+    res.send('El pago de inscripción está pendiente de aprobación. Recibirás una notificación pronto.');
+});
+
+
 // --- Programación de Tareas Diarias (Node-Cron) ---
 
 // Tarea para crear las partidas de hoy y mañana al iniciar el servidor
