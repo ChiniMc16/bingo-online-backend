@@ -403,13 +403,13 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
 },
             external_reference: `<span class="math-inline">\{gameId\}\-</span>{userId}`, // CORRECCIÓN: Usar template literal directamente
            back_urls: {
-           success: `${process.env.NGROK_URL}/api/payments/success`, // <-- ¡AQUÍ ESTÁ LA CORRECCIÓN!
-           failure: `${process.env.NGROK_URL}/api/payments/failure`,
-           pending: `${process.env.NGROK_URL}/api/payments/pending`,
+           success: `${process.env.RENDER_EXTERNAL_URL}/api/payments/success`, // <-- ¡AQUÍ ESTÁ LA CORRECCIÓN!
+           failure: `${process.env.RENDER_EXTERNAL_URL}/api/payments/failure`,
+           pending: `${process.env.RENDER_EXTERNAL_URL}/api/payments/pending`,
            },
             auto_return: "approved", // Redirige automáticamente al usuario si el pago es aprobado
             // ¡IMPORTANTE! Esta URL DEBE SER PÚBLICA. Usa ngrok para pruebas locales.
-            notification_url: `${process.env.NGROK_URL}/api/payments/webhook?source_news=webhooks`,
+            notification_url: `${process.env.RENDER_EXTERNAL_URL}/api/payments/webhook?source_news=webhooks`,
         };
 
         let mpResponse;
