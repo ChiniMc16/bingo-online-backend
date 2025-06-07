@@ -392,7 +392,7 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
             items: [
                 {
                     title: `Inscripción a partida de Bingo #${gameId} - ${scheduled.toLocaleString(DateTime.DATETIME_FULL)}`,
-                    unit_price: parseFloat(game.entry_fee),
+                    unit_price: parseFloat(100.00),
                     quantity: 1,
                     currency_id: "ARS",
                 }
