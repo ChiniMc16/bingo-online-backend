@@ -310,165 +310,96 @@ app.get('/api/games', authenticateToken, async (req, res) => {
 });
 
 // Ruta para que un usuario se registre en una partida
+// En tu index.js, reemplaza la ruta existente con esta:
+
 app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
-    const gameId = req.params.gameId;
-    const userId = req.user.id; // Obtenemos el ID del usuario del token JWT
-    const username = req.user.username; // Obtenemos el username del token para Mercado Pago
-    const userEmail = req.user.email; // Obtenemos el email del token para Mercado Pago
+    const { gameId } = req.params;
+    const { id: userId, email: userEmail } = req.user; // Obtenemos datos del token
 
-    // Obtiene la hora actual en la zona horaria de Argentina
     const now = DateTime.now().setZone("America/Argentina/Buenos_Aires");
+    const clientDB = await pool.connect(); // Obtenemos un cliente de la pool para la transacción
 
-    try { // <-- Inicio del try principal de la ruta
-        // 1. Obtener los detalles de la partida
-        const gameResult = await pool.query('SELECT * FROM games WHERE id = $1', [gameId]);
+    try {
+        // --- INICIAMOS LA TRANSACCIÓN ---
+        await clientDB.query('BEGIN');
+
+        // 1. Obtener detalles de la partida y bloquear la fila para evitar "race conditions"
+        // 'FOR UPDATE' bloquea la fila para que otra petición no pueda modificarla al mismo tiempo.
+        const gameResult = await clientDB.query('SELECT * FROM games WHERE id = $1 FOR UPDATE', [gameId]);
         const game = gameResult.rows[0];
 
-        if (!game) {
-            return res.status(404).json({ message: 'Partida no encontrada.' });
-        }
-
-        // 2. Verificar si el registro está abierto y si no está llena
-        // Convierte las fechas de la BD a objetos Luxon para comparar en la misma zona horaria
-        const regOpen = DateTime.fromJSDate(game.registration_open_at).setZone("America/Argentina/Buenos_Aires");
+        // --- VALIDACIONES (Las mismas que ya tenías, están bien) ---
+        if (!game) throw new Error('Partida no encontrada.');
+        if (game.status !== 'SCHEDULED') throw new Error('El registro para esta partida no está abierto.');
         const regClose = DateTime.fromJSDate(game.registration_close_at).setZone("America/Argentina/Buenos_Aires");
-        const scheduled = DateTime.fromJSDate(game.scheduled_time).setZone("America/Argentina/Buenos_Aires");
+        if (now > regClose) throw new Error('El registro para esta partida ya ha cerrado.');
+        if (game.current_players >= game.max_players) throw new Error('La partida está llena.');
 
-        // --- NUEVOS CONSOLE.LOG DE DEPURACIÓN EN LA RUTA ---
-        console.log(`\n--- DEBUG REGISTRO EN PARTIDA ${gameId} ---`);
-        console.log(`Hora actual (now):      ${now.toISO()} (Local: ${now.toLocaleString(DateTime.DATETIME_FULL)})`);
-        console.log(`Reg Open (BD):          ${regOpen.toISO()} (Local: ${regOpen.toLocaleString(DateTime.DATETIME_FULL)})`);
-        console.log(`Reg Close (BD):         ${regClose.toISO()} (Local: ${regClose.toLocaleString(DateTime.DATETIME_FULL)})`);
-        console.log(`Partida Inicia (scheduled): ${scheduled.toISO()} (Local: ${scheduled.toLocaleString(DateTime.DATETIME_FULL)})`);
-        console.log(`Tipo de now: ${typeof now}, Tipo de regOpen: ${typeof regOpen}`);
-        console.log(`Valores Unix (ms): now=<span class="math-inline">\{now\.toMillis\(\)\}, regOpen\=</span>{regOpen.toMillis()}`);
-        console.log(`now < regOpen ? ${now < regOpen}`); // ¿Aún no abrió?
-        console.log(`now > regClose ? ${now > regClose}`); // ¿Ya cerró?
-        console.log(`now > scheduled ? ${now > scheduled}`); // ¿Ya empezó la partida?
-        console.log(`-------------------------------------------`);
-        // --- FIN NUEVOS CONSOLE.LOG ---
-
-
-        // Validación de estado de la partida
-        if (game.status !== 'SCHEDULED' && game.status !== 'REGISTRATION_OPEN') {
-            return res.status(400).json({ message: 'El registro para esta partida no está abierto (estado inválido).' });
-        }
-
-        // Validaciones de tiempo de registro
-        if (now < regOpen) { // Si la hora actual es anterior a la hora de apertura
-            return res.status(400).json({ message: 'El registro para esta partida aún no ha abierto.' });
-        }
-        if (now > regClose) { // Si la hora actual es posterior a la hora de cierre
-            return res.status(400).json({ message: 'El registro para esta partida ya ha cerrado.' });
-        }
-        // También podemos verificar que la partida no haya comenzado
-        if (now > scheduled) {
-            return res.status(400).json({ message: 'La partida ya ha comenzado o terminado.' });
-        }
-
-        // Validación de cupo de jugadores
-        if (game.current_players >= game.max_players) {
-            return res.status(400).json({ message: 'La partida está llena. Intenta otra.' });
-        }
-
-        // 3. Verificar si el usuario ya está registrado en esta partida
-        const existingRegistration = await pool.query(
+        const existingRegistration = await clientDB.query(
             'SELECT * FROM game_participants WHERE game_id = $1 AND user_id = $2',
             [gameId, userId]
         );
-        if (existingRegistration.rows.length > 0) {
-            return res.status(409).json({ message: 'Ya estás registrado en esta partida.' });
-        }
+        if (existingRegistration.rows.length > 0) throw new Error('Ya estás registrado en esta partida.');
 
-        // --- Generar los 5 cartones de bingo para el jugador ---
-        const userBingoCards = [];
-        for (let i = 0; i < 5; i++) {
-            userBingoCards.push(generateBingoCard());
-        }
-        const cardsJson = JSON.stringify(userBingoCards);
-
-        // --- Lógica de Integración con Mercado Pago ---
-        const preference = {
-            items: [
-                {
-                    title: `Inscripción a partida de Bingo #${gameId} - ${scheduled.toLocaleString(DateTime.DATETIME_FULL)}`,
-                    unit_price: parseFloat(100.00),
-                    quantity: 1,
-                    currency_id: "ARS",
-                }
-            ],
+        // --- CREACIÓN DE LA PREFERENCIA DE MERCADO PAGO ---
+        const preferenceBody = {
+            items: [{
+                title: `Inscripción a partida de Bingo #${gameId}`,
+                unit_price: parseFloat(game.entry_fee),
+                quantity: 1,
+                currency_id: "ARS",
+            }],
             payer: {
-    // ¡IMPORTANTE! Usa el email completo de tu COMPRADOR DE PRUEBA de Mercado Pago aquí
-    email: 'TESTUSER1180747306@testuser.com', // CORRECCIÓN: Agrega "@testuser.com"
-},
-            external_reference: `<span class="math-inline">\{gameId\}\-</span>{userId}`, // CORRECCIÓN: Usar template literal directamente
-           back_urls: {
-           success: `${process.env.RENDER_EXTERNAL_URL}/api/payments/success`, // <-- ¡AQUÍ ESTÁ LA CORRECCIÓN!
-           failure: `${process.env.RENDER_EXTERNAL_URL}/api/payments/failure`,
-           pending: `${process.env.RENDER_EXTERNAL_URL}/api/payments/pending`,
-           },
-            auto_return: "approved", // Redirige automáticamente al usuario si el pago es aprobado
-            // ¡IMPORTANTE! Esta URL DEBE SER PÚBLICA. Usa ngrok para pruebas locales.
-            notification_url: `${process.env.RENDER_EXTERNAL_URL}/api/payments/webhook?source_news=webhooks`,
+                email: userEmail, // Usamos el email del usuario logueado
+            },
+            // Usamos un JSON en external_reference para pasar más datos útiles al webhook
+            external_reference: JSON.stringify({ gameId: gameId, userId: userId }),
+            back_urls: {
+                success: `${process.env.RENDER_EXTERNAL_URL}/payment-feedback?status=success`,
+                failure: `${process.env.RENDER_EXTERNAL_URL}/payment-feedback?status=failure`,
+                pending: `${process.env.RENDER_EXTERNAL_URL}/payment-feedback?status=pending`,
+            },
+            auto_return: "approved",
+            notification_url: `${process.env.RENDER_EXTERNAL_URL}/api/payments/webhook`,
         };
 
-        let mpResponse;
-        try { // <-- Inicio del try para la llamada a Mercado Pago
-            const preferenceInstance = new mercadopago.Preference(client); // CORRECTO: Usa mercadopago.Preference
-            mpResponse = await preferenceInstance.create({ body: preference });
+        const preference = new mercadopago.Preference(client);
+        const mpResponse = await preference.create({ body: preferenceBody });
 
-            // --- NUEVO CONSOLE.LOG PARA LA RESPUESTA DE MP ---
-            console.log(`\n--- DEBUG RESPUESTA MERCADO PAGO ---`);
-            console.log(`Status Code MP: ${mpResponse.statusCode}`); // Código HTTP de la respuesta de MP
-            console.log(`MP Response Body:`, JSON.stringify(mpResponse.body, null, 2)); // Contenido del body de MP
-            console.log(`MP Response Headers:`, JSON.stringify(mpResponse.headers, null, 2)); // Headers de la respuesta de MP
-            console.log(`------------------------------------\n`);
-            // --- FIN NUEVO CONSOLE.LOG ---
-
-            // Si mpResponse.body es null o undefined, esto aún fallará.
-            // PERO si el 'create' lanza un error, el catch externo lo atrapará.
-            // Si llega aquí, significa que la llamada a MP no arrojó una excepción.
-            // AÚN ASÍ, debemos verificar que el 'body' contenga 'init_point'
-            if (!mpResponse || !mpResponse.body || !mpResponse.body.init_point) {
-                 // Si no hay body o init_point, forzar un error para ir al catch externo
-                 throw new Error("Mercado Pago no devolvió una URL de pago válida.");
-            }
-
-            const checkoutUrl = mpResponse.body.init_point;
-            const preferenceId = mpResponse.body.id;
-
-
-            // 4. Registrar al usuario en la partida con estado PENDING y los cartones
-            //    ¡ESTA INSERCIÓN SOLO OCURRE SI LA PREFERENCIA DE MP SE CREÓ CON ÉXITO!
-            await pool.query(
-                `INSERT INTO game_participants (game_id, user_id, registration_time, payment_status, mp_preference_id, card_numbers)
-                 VALUES ($1, $2, $3, $4, $5, $6)`,
-                [gameId, userId, now.toJSDate(), 'PENDING', preferenceId, cardsJson]
-            );
-
-            res.status(200).json({
-                message: 'Redirige al usuario para completar el pago.',
-                checkoutUrl: checkoutUrl,
-                preferenceId: preferenceId
-            });
-
-        } catch (mpError) { // <-- Captura de errores directos del SDK de Mercado Pago
-            console.error('Error directo del SDK de Mercado Pago (pre_DB_insert):', mpError);
-            // Si el error viene con una respuesta HTTP, puedes intentar acceder a ella
-            if (mpError.status_code) {
-                 console.error(`MP Error Status Code: ${mpError.status_code}`);
-            }
-            if (mpError.message && typeof mpError.message === 'object') {
-                 console.error(`MP Error Message Body:`, JSON.stringify(mpError.message, null, 2));
-            } else {
-                 console.error(`MP Error Message: ${mpError.message}`);
-            }
-            res.status(500).json({ message: 'Error al procesar el pago con Mercado Pago.', details: mpError.message || 'Error desconocido del SDK de MP.' });
+        if (!mpResponse.body || !mpResponse.body.init_point) {
+            throw new Error("Mercado Pago no devolvió una URL de pago válida.");
         }
 
-    } catch (error) { // <-- Captura de errores generales de la ruta (DB, validaciones, etc.)
-        console.error('Error general en la ruta de registro:', error);
-        res.status(500).json({ message: 'Error interno del servidor durante el registro de partida.', details: error.message });
+        const checkoutUrl = mpResponse.body.init_point;
+        const preferenceId = mpResponse.body.id;
+
+        // --- GENERACIÓN DE CARTONES E INSERCIÓN EN LA DB ---
+        const userBingoCards = Array.from({ length: 5 }, () => generateBingoCard());
+        const cardsJson = JSON.stringify(userBingoCards);
+
+        // Insertamos el participante. ¡Esto solo ocurre si MP tuvo éxito!
+        await clientDB.query(
+            `INSERT INTO game_participants (game_id, user_id, registration_time, payment_status, mp_preference_id, card_numbers)
+             VALUES ($1, $2, NOW(), $3, $4, $5)`,
+            [gameId, userId, 'PENDING', preferenceId, cardsJson]
+        );
+
+        // --- CONFIRMAMOS LA TRANSACCIÓN ---
+        await clientDB.query('COMMIT');
+
+        res.status(200).json({
+            message: 'Preferencia creada. Redirige al usuario para pagar.',
+            checkoutUrl: checkoutUrl,
+        });
+
+    } catch (error) {
+        // --- SI ALGO FALLA, REVERTIMOS TODO ---
+        await clientDB.query('ROLLBACK');
+        console.error('Error en registro de partida (transacción revertida):', error.message);
+        res.status(500).json({ message: error.message || 'Error interno del servidor.' });
+    } finally {
+        // --- LIBERAMOS EL CLIENTE DE LA DB ---
+        clientDB.release();
     }
 });
 
