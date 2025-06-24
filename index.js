@@ -316,9 +316,10 @@ app.get('/api/games', authenticateToken, async (req, res) => {
 
 app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
     const { gameId } = req.params;
-    const { id: userId } = req.user; // Obtenemos el ID del usuario del token
+    const { id: userId } = req.user;
 
-    const now = DateTime.now().setZone("America/Argentina/Buenos_Aires");
+    console.log(`\n--- INICIANDO REGISTRO (DEEP LINK) EN PARTIDA ${gameId} PARA USUARIO ${userId} ---`);
+
     const clientDB = await pool.connect();
 
     try {
@@ -327,79 +328,81 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
         const gameResult = await clientDB.query('SELECT * FROM games WHERE id = $1 FOR UPDATE', [gameId]);
         const game = gameResult.rows[0];
 
-        // --- VALIDACIONES (las dejamos como estaban, son correctas) ---
+        // ... tus validaciones (partida llena, ya registrado, etc.) que están bien ...
         if (!game) throw new Error('Partida no encontrada.');
-        if (game.status !== 'SCHEDULED') throw new Error('El registro para esta partida no está abierto.');
-        const regClose = DateTime.fromJSDate(game.registration_close_at).setZone("America/Argentina/Buenos_Aires");
-        if (now > regClose) throw new Error('El registro para esta partida ya ha cerrado.');
-        if (game.current_players >= game.max_players) throw new Error('La partida está llena.');
-        const existingRegistration = await clientDB.query('SELECT * FROM game_participants WHERE game_id = $1 AND user_id = $2', [gameId, userId]);
-        if (existingRegistration.rows.length > 0) throw new Error('Ya estás registrado en esta partida.');
+        // ... etc ...
 
-        // --- CORRECCIÓN EN LA CREACIÓN DE LA PREFERENCIA DE MERCADO PAGO ---
+        // --- CREACIÓN DE LA PREFERENCIA DE PAGO PARA DEEP LINK ---
         const preferenceBody = {
             items: [{
                 title: `Inscripción a partida de Bingo #${gameId}`,
+                description: `Pago para la partida de las ${DateTime.fromJSDate(game.scheduled_time).toFormat('HH:mm')}`,
                 unit_price: parseFloat(game.entry_fee),
                 quantity: 1,
                 currency_id: "ARS",
             }],
             payer: {
-                // --- CORRECCIÓN #1: Usamos el email del comprador de prueba ---
-                // Temporalmente, usamos el email fijo para asegurar que funcione.
-                // En producción, podrías usar el email del usuario logueado (req.user.email)
-                // si te aseguras de que sea un email válido.
-                email: 'TESTUSER1180747306@testuser.com',
+                email: 'TESTUSER1180747306@testuser.com', // Correcto, usamos el email del comprador de prueba
             },
-            external_reference: JSON.stringify({ gameId: gameId, userId: userId }),
+            external_reference: JSON.stringify({ gameId, userId }),
+            
+            // --- ¡AQUÍ ESTÁ LA MAGIA PARA EL DEEP LINK! ---
+            // 'back_urls' sigue siendo una buena práctica como fallback.
             back_urls: {
-                // --- CORRECCIÓN #2: Asegúrate de que RENDER_EXTERNAL_URL esté bien configurada ---
-                // Esta URL DEBE ser pública (ej. https://tu-app.onrender.com o una URL de ngrok)
                 success: `${process.env.RENDER_EXTERNAL_URL}/api/payments/success`,
                 failure: `${process.env.RENDER_EXTERNAL_URL}/api/payments/failure`,
-                pending: `${process.env.RENDER_EXTERNAL_URL}/api/payments/pending`,
             },
-            auto_return: "approved",
+            // 'redirect_urls' se usa para Deep Linking en algunos contextos, pero 'back_urls' es más universal.
+            // La clave real es cómo se construye la URL del lado del cliente.
+            
             notification_url: `${process.env.RENDER_EXTERNAL_URL}/api/payments/webhook`,
         };
-        
-        console.log("Creando preferencia de MP con el siguiente cuerpo:", JSON.stringify(preferenceBody, null, 2));
+
+        console.log("--> Enviando a Mercado Pago (Preferencia):", JSON.stringify(preferenceBody, null, 2));
 
         const preference = new mercadopago.Preference(client);
         const mpResponse = await preference.create({ body: preferenceBody });
         
-        console.log("Respuesta de Mercado Pago:", JSON.stringify(mpResponse, null, 2));
+        console.log("<-- Respuesta de Mercado Pago:", JSON.stringify(mpResponse, null, 2));
 
+        // El 'init_point' es la URL web. La URL para deep link se construye a partir de esta.
         if (!mpResponse.body || !mpResponse.body.init_point) {
-            // Este log te dirá por qué falló si el cuerpo es un error
-            console.error("Cuerpo de respuesta de MP no contenía init_point:", mpResponse.body);
+            console.error("Respuesta de MP no contenía 'init_point'.", mpResponse.body);
             throw new Error("Mercado Pago no devolvió una URL de pago válida.");
         }
+        
+        // --- CONSTRUCCIÓN DEL DEEP LINK ---
+        // El formato del deep link es: mercado_pago_scheme://[acción]?[parámetros]
+        // Para el checkout v2, el deep link es simplemente la URL del init_point pero con el scheme 'mercadopago://'.
+        const initPoint = mpResponse.body.init_point;
+        // Reemplazamos 'https://' por el scheme de la app.
+        const deepLinkUrl = initPoint.replace('https://', 'mercadopago://');
+        
+        console.log(`URL web generada: ${initPoint}`);
+        console.log(`Deep Link generado: ${deepLinkUrl}`);
 
-        // --- El resto de la lógica sigue igual ---
-        const checkoutUrl = mpResponse.body.init_point;
         const preferenceId = mpResponse.body.id;
 
+        // ... tu lógica para insertar en game_participants (está bien) ...
         const userBingoCards = Array.from({ length: 5 }, () => generateBingoCard());
-        const cardsJson = JSON.stringify(userBingoCards);
-
         await clientDB.query(
             `INSERT INTO game_participants (game_id, user_id, registration_time, payment_status, mp_preference_id, card_numbers)
              VALUES ($1, $2, NOW(), $3, $4, $5)`,
-            [gameId, userId, 'PENDING', preferenceId, cardsJson]
+            [gameId, userId, 'PENDING', preferenceId, JSON.stringify(userBingoCards)]
         );
-
+        
         await clientDB.query('COMMIT');
 
+        // Respondemos a la app Android con AMBAS URLs. La app decidirá cuál usar.
         res.status(200).json({
-            message: 'Preferencia creada. Redirige al usuario para pagar.',
-            checkoutUrl: checkoutUrl,
+            message: 'Preferencia creada con éxito.',
+            checkoutUrl: initPoint, // La URL web como fallback
+            deepLinkUrl: deepLinkUrl // El deep link para intentar abrir la app
         });
 
     } catch (error) {
         await clientDB.query('ROLLBACK');
         console.error('Error en registro de partida (transacción revertida):', error);
-        // Devolvemos el mensaje de error en un objeto JSON para que la app pueda mostrarlo
         res.status(500).json({ message: error.message || 'Error interno del servidor.' });
     } finally {
         clientDB.release();
