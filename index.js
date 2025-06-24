@@ -312,36 +312,31 @@ app.get('/api/games', authenticateToken, async (req, res) => {
 // Ruta para que un usuario se registre en una partida
 // En tu index.js, reemplaza la ruta existente con esta:
 
+// En tu archivo index.js, reemplaza la ruta completa de registro en partida
+
 app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
     const { gameId } = req.params;
-    const { id: userId, email: userEmail } = req.user; // Obtenemos datos del token
+    const { id: userId } = req.user; // Obtenemos el ID del usuario del token
 
     const now = DateTime.now().setZone("America/Argentina/Buenos_Aires");
-    const clientDB = await pool.connect(); // Obtenemos un cliente de la pool para la transacción
+    const clientDB = await pool.connect();
 
     try {
-        // --- INICIAMOS LA TRANSACCIÓN ---
         await clientDB.query('BEGIN');
 
-        // 1. Obtener detalles de la partida y bloquear la fila para evitar "race conditions"
-        // 'FOR UPDATE' bloquea la fila para que otra petición no pueda modificarla al mismo tiempo.
         const gameResult = await clientDB.query('SELECT * FROM games WHERE id = $1 FOR UPDATE', [gameId]);
         const game = gameResult.rows[0];
 
-        // --- VALIDACIONES (Las mismas que ya tenías, están bien) ---
+        // --- VALIDACIONES (las dejamos como estaban, son correctas) ---
         if (!game) throw new Error('Partida no encontrada.');
         if (game.status !== 'SCHEDULED') throw new Error('El registro para esta partida no está abierto.');
         const regClose = DateTime.fromJSDate(game.registration_close_at).setZone("America/Argentina/Buenos_Aires");
         if (now > regClose) throw new Error('El registro para esta partida ya ha cerrado.');
         if (game.current_players >= game.max_players) throw new Error('La partida está llena.');
-
-        const existingRegistration = await clientDB.query(
-            'SELECT * FROM game_participants WHERE game_id = $1 AND user_id = $2',
-            [gameId, userId]
-        );
+        const existingRegistration = await clientDB.query('SELECT * FROM game_participants WHERE game_id = $1 AND user_id = $2', [gameId, userId]);
         if (existingRegistration.rows.length > 0) throw new Error('Ya estás registrado en esta partida.');
 
-        // --- CREACIÓN DE LA PREFERENCIA DE MERCADO PAGO ---
+        // --- CORRECCIÓN EN LA CREACIÓN DE LA PREFERENCIA DE MERCADO PAGO ---
         const preferenceBody = {
             items: [{
                 title: `Inscripción a partida de Bingo #${gameId}`,
@@ -350,41 +345,50 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
                 currency_id: "ARS",
             }],
             payer: {
-                email: userEmail, // Usamos el email del usuario logueado
+                // --- CORRECCIÓN #1: Usamos el email del comprador de prueba ---
+                // Temporalmente, usamos el email fijo para asegurar que funcione.
+                // En producción, podrías usar el email del usuario logueado (req.user.email)
+                // si te aseguras de que sea un email válido.
+                email: 'TESTUSER1180747306@testuser.com',
             },
-            // Usamos un JSON en external_reference para pasar más datos útiles al webhook
             external_reference: JSON.stringify({ gameId: gameId, userId: userId }),
             back_urls: {
-                success: `${process.env.RENDER_EXTERNAL_URL}/payment-feedback?status=success`,
-                failure: `${process.env.RENDER_EXTERNAL_URL}/payment-feedback?status=failure`,
-                pending: `${process.env.RENDER_EXTERNAL_URL}/payment-feedback?status=pending`,
+                // --- CORRECCIÓN #2: Asegúrate de que RENDER_EXTERNAL_URL esté bien configurada ---
+                // Esta URL DEBE ser pública (ej. https://tu-app.onrender.com o una URL de ngrok)
+                success: `${process.env.RENDER_EXTERNAL_URL}/api/payments/success`,
+                failure: `${process.env.RENDER_EXTERNAL_URL}/api/payments/failure`,
+                pending: `${process.env.RENDER_EXTERNAL_URL}/api/payments/pending`,
             },
             auto_return: "approved",
             notification_url: `${process.env.RENDER_EXTERNAL_URL}/api/payments/webhook`,
         };
+        
+        console.log("Creando preferencia de MP con el siguiente cuerpo:", JSON.stringify(preferenceBody, null, 2));
 
         const preference = new mercadopago.Preference(client);
         const mpResponse = await preference.create({ body: preferenceBody });
+        
+        console.log("Respuesta de Mercado Pago:", JSON.stringify(mpResponse, null, 2));
 
         if (!mpResponse.body || !mpResponse.body.init_point) {
+            // Este log te dirá por qué falló si el cuerpo es un error
+            console.error("Cuerpo de respuesta de MP no contenía init_point:", mpResponse.body);
             throw new Error("Mercado Pago no devolvió una URL de pago válida.");
         }
 
+        // --- El resto de la lógica sigue igual ---
         const checkoutUrl = mpResponse.body.init_point;
         const preferenceId = mpResponse.body.id;
 
-        // --- GENERACIÓN DE CARTONES E INSERCIÓN EN LA DB ---
         const userBingoCards = Array.from({ length: 5 }, () => generateBingoCard());
         const cardsJson = JSON.stringify(userBingoCards);
 
-        // Insertamos el participante. ¡Esto solo ocurre si MP tuvo éxito!
         await clientDB.query(
             `INSERT INTO game_participants (game_id, user_id, registration_time, payment_status, mp_preference_id, card_numbers)
              VALUES ($1, $2, NOW(), $3, $4, $5)`,
             [gameId, userId, 'PENDING', preferenceId, cardsJson]
         );
 
-        // --- CONFIRMAMOS LA TRANSACCIÓN ---
         await clientDB.query('COMMIT');
 
         res.status(200).json({
@@ -393,12 +397,11 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
         });
 
     } catch (error) {
-        // --- SI ALGO FALLA, REVERTIMOS TODO ---
         await clientDB.query('ROLLBACK');
-        console.error('Error en registro de partida (transacción revertida):', error.message);
+        console.error('Error en registro de partida (transacción revertida):', error);
+        // Devolvemos el mensaje de error en un objeto JSON para que la app pueda mostrarlo
         res.status(500).json({ message: error.message || 'Error interno del servidor.' });
     } finally {
-        // --- LIBERAMOS EL CLIENTE DE LA DB ---
         clientDB.release();
     }
 });
@@ -444,11 +447,61 @@ app.get('/api/payments/pending', (req, res) => {
     res.send('El pago de inscripción está pendiente de aprobación. Recibirás una notificación pronto.');
 });
 
-app.post('/api/payments/webhook', (req, res) => { // <-- ¡ESTA RUTA DEBE EXISTIR Y SER POST!
-    console.log("Webhook de Mercado Pago recibido:", req.query);
-    console.log("Cuerpo del Webhook:", req.body);
-    // Aquí implementaremos la lógica para procesar el pago.
-    res.status(200).send('Webhook recibido exitosamente'); // Siempre responder con 200 OK
+// Reemplaza tu ruta de webhook vacía con esta lógica completa
+
+app.post('/api/payments/webhook', async (req, res) => {
+    const { query, body } = req;
+    console.log("Webhook de Mercado Pago recibido.");
+    console.log("Query:", query);
+
+    if (query.type === 'payment' && body.data && body.data.id) {
+        const paymentId = body.data.id;
+        console.log(`Procesando notificación para el pago ID: ${paymentId}`);
+
+        try {
+            const payment = await mercadopago.payment.get({ id: paymentId });
+            console.log("Respuesta de la API de MP sobre el pago:", payment);
+
+            if (payment && payment.status === 'approved') {
+                const { external_reference } = payment;
+                if (!external_reference) throw new Error(`El pago ${paymentId} no tiene external_reference.`);
+
+                const { gameId, userId } = JSON.parse(external_reference);
+                console.log(`Pago aprobado para gameId: ${gameId}, userId: ${userId}`);
+
+                const clientDB = await pool.connect();
+                try {
+                    await clientDB.query('BEGIN');
+                    const updateResult = await clientDB.query(
+                        `UPDATE game_participants
+                         SET payment_status = 'APPROVED', mp_payment_id = $1
+                         WHERE game_id = $2 AND user_id = $3 AND payment_status = 'PENDING'
+                         RETURNING id`,
+                        [paymentId, gameId, userId]
+                    );
+
+                    if (updateResult.rowCount > 0) {
+                        await clientDB.query(
+                            'UPDATE games SET current_players = current_players + 1 WHERE id = $1',
+                            [gameId]
+                        );
+                        console.log(`Usuario ${userId} confirmado en partida ${gameId}. Contador de jugadores actualizado.`);
+                    } else {
+                        console.log(`El pago ${paymentId} ya fue procesado o el participante no estaba en PENDING.`);
+                    }
+                    await clientDB.query('COMMIT');
+                } catch (dbError) {
+                    await clientDB.query('ROLLBACK');
+                    console.error('Error de base de datos al procesar webhook:', dbError);
+                } finally {
+                    clientDB.release();
+                }
+            }
+        } catch (error) {
+            console.error('Error al consultar el pago en Mercado Pago:', error);
+        }
+    }
+    res.status(200).send('Webhook recibido');
 });
 
 // --- Programación de Tareas Diarias (Node-Cron) ---
