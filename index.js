@@ -1,4 +1,4 @@
-// index.js (Versión Corregida y Limpia)
+// index.js (Versión Final, Única y Corregida)
 
 require('dotenv').config();
 
@@ -17,13 +17,14 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: "*",
+        origin: "*", // Para desarrollo.
         methods: ["GET", "POST"]
     }
 });
 
 const PORT = process.env.PORT || 3000;
 
+// Configuración de la Base de Datos
 const pool = new Pool({
     user: process.env.DB_USER,
     host: process.env.DB_HOST,
@@ -32,31 +33,37 @@ const pool = new Pool({
     port: process.env.DB_PORT,
 });
 
+// Constantes del Juego
 const GAME_TIMES = ['20:00', '22:00'];
 const MAX_PLAYERS_PER_GAME = 100;
-const ENTRY_FEE = 10.00;
+const ENTRY_FEE = 1000.00;
 
+// Configuración de Mercado Pago
 const mpClient = new mercadopago.MercadoPagoConfig({
     accessToken: process.env.MP_ACCESS_TOKEN,
 });
 
+// Middlewares de Express
 app.use(cors());
 app.use(express.json());
 
-// --- Middleware ---
+// --- Middleware de Autenticación JWT ---
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
     if (token == null) return res.sendStatus(401);
 
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) return res.sendStatus(403);
+        if (err) {
+            console.error("Token JWT inválido:", err.message);
+            return res.sendStatus(403);
+        }
         req.user = user;
         next();
     });
 };
 
-// --- Funciones de Lógica ---
+// --- Funciones de Lógica de Juego ---
 function generateBingoCard() {
     const columns = { 'B': [], 'I': [], 'N': [], 'G': [], 'O': [] };
     function fillColumn(start, end, count) {
@@ -103,23 +110,26 @@ async function createDailyGames(dateInput) {
     }
 }
 
-// --- Rutas ---
+// --- RUTAS DE LA API ---
+
+// Ruta de prueba
 app.get('/', (req, res) => res.send('Servidor de Bingo Online funcionando!'));
 
-// Autenticación
+// Rutas de Autenticación
 app.post('/api/register', async (req, res) => {
     const { username, email, password } = req.body;
-    if (!username || !email || !password) return res.status(400).json({ message: 'Campos obligatorios.' });
+    if (!username || !email || !password) return res.status(400).json({ message: 'Todos los campos son obligatorios.' });
     try {
         const existingUser = await pool.query('SELECT id FROM users WHERE username = $1 OR email = $2', [username, email]);
-        if (existingUser.rows.length > 0) return res.status(409).json({ message: 'Usuario o email ya registrados.' });
+        if (existingUser.rows.length > 0) return res.status(409).json({ message: 'El nombre de usuario o el email ya están registrados.' });
+        
         const salt = await bcrypt.genSalt(10);
         const passwordHash = await bcrypt.hash(password, salt);
         const result = await pool.query(
             'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email',
             [username, email, passwordHash]
         );
-        res.status(201).json({ message: 'Usuario registrado!', user: result.rows[0] });
+        res.status(201).json({ message: 'Usuario registrado exitosamente!', user: result.rows[0] });
     } catch (error) {
         console.error('Error en registro:', error);
         res.status(500).json({ message: 'Error interno del servidor.' });
@@ -133,24 +143,26 @@ app.post('/api/login', async (req, res) => {
         const userResult = await pool.query('SELECT * FROM users WHERE username = $1 OR email = $1', [identifier]);
         const user = userResult.rows[0];
         if (!user) return res.status(401).json({ message: 'Credenciales inválidas.' });
+
         const isMatch = await bcrypt.compare(password, user.password_hash);
         if (!isMatch) return res.status(401).json({ message: 'Credenciales inválidas.' });
+
         const token = jwt.sign({ id: user.id, username: user.username, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
-        res.json({ message: 'Login exitoso!', token, user: { id: user.id, username: user.username, email: user.email, balance: user.balance } });
+        res.json({ message: 'Inicio de sesión exitoso!', token, user: { id: user.id, username: user.username, email: user.email, balance: user.balance } });
     } catch (error) {
         console.error('Error en login:', error);
         res.status(500).json({ message: 'Error interno del servidor.' });
     }
 });
 
-// Partidas
+// Rutas de Partidas
 app.get('/api/games', authenticateToken, async (req, res) => {
     try {
         const games = await pool.query(`SELECT * FROM games WHERE scheduled_time >= NOW() ORDER BY scheduled_time ASC`);
         res.json(games.rows);
     } catch (error) {
         console.error('Error al obtener partidas:', error);
-        res.status(500).json({ message: 'Error interno.' });
+        res.status(500).json({ message: 'Error interno al obtener partidas.' });
     }
 });
 
@@ -158,16 +170,20 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
     const { gameId } = req.params;
     const { id: userId, email: userEmail } = req.user;
     const clientDB = await pool.connect();
+
     try {
         await clientDB.query('BEGIN');
+
         const gameResult = await clientDB.query('SELECT * FROM games WHERE id = $1 FOR UPDATE', [gameId]);
         const game = gameResult.rows[0];
+
         if (!game) throw new Error('Partida no encontrada.');
-        if (game.status !== 'SCHEDULED') throw new Error('El registro no está abierto.');
-        if (DateTime.now() > DateTime.fromJSDate(game.scheduled_time)) throw new Error('El registro ha cerrado.');
+        if (game.status !== 'SCHEDULED') throw new Error('El registro para esta partida no está abierto.');
+        if (DateTime.now() > DateTime.fromJSDate(game.scheduled_time)) throw new Error('El registro para esta partida ya ha cerrado.');
         if (game.current_players >= game.max_players) throw new Error('La partida está llena.');
+        
         const existingRegistration = await clientDB.query('SELECT * FROM game_participants WHERE game_id = $1 AND user_id = $2', [gameId, userId]);
-        if (existingRegistration.rows.length > 0) throw new Error('Ya estás registrado.');
+        if (existingRegistration.rows.length > 0) throw new Error('Ya estás registrado en esta partida.');
 
         const preferenceBody = {
             items: [{ title: `Inscripción a Bingo #${gameId}`, unit_price: parseFloat(game.entry_fee), quantity: 1, currency_id: "ARS" }],
@@ -175,7 +191,7 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
             external_reference: JSON.stringify({ gameId, userId }),
             back_urls: {
                 success: `${process.env.RENDER_EXTERNAL_URL}/api/payments/success`,
-                failure: `${process.env.RENDER_EXTERNAL_URL}/api/payments/failure`
+                failure: `${process.env.RENDER_EXTERNAL_URL}/api/payments/failure`,
             },
             notification_url: `${process.env.RENDER_EXTERNAL_URL}/api/payments/webhook`,
         };
@@ -183,11 +199,11 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
         const preference = new mercadopago.Preference(mpClient);
         const mpResponse = await preference.create({ body: preferenceBody });
 
-        const initPoint = mpResponse.body.sandbox_init_point || mpResponse.body.init_point;
-        if (!initPoint) throw new Error("Mercado Pago no devolvió una URL de pago.");
+        const initPoint = mpResponse.sandbox_init_point || mpResponse.init_point;
+        if (!initPoint) throw new Error("Mercado Pago no devolvió una URL de pago válida.");
 
         const deepLinkUrl = initPoint.replace('https://', 'mercadopago://');
-        const preferenceId = mpResponse.body.id;
+        const preferenceId = mpResponse.id;
 
         const userBingoCards = Array.from({ length: 5 }, () => generateBingoCard());
         await clientDB.query(
@@ -195,34 +211,45 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
              VALUES ($1, $2, 'PENDING', $3, $4)`,
             [gameId, userId, preferenceId, JSON.stringify(userBingoCards)]
         );
+        
         await clientDB.query('COMMIT');
 
-        res.status(200).json({ message: 'Preferencia creada.', checkoutUrl: initPoint, deepLinkUrl });
+        res.status(200).json({
+            message: 'Preferencia creada.',
+            checkoutUrl: initPoint, // URL web para fallback
+            deepLinkUrl: deepLinkUrl  // Deep link para abrir la app
+        });
+
     } catch (error) {
         await clientDB.query('ROLLBACK');
         console.error('Error en registro de partida:', error);
-        res.status(500).json({ message: error.message });
+        res.status(500).json({ message: error.message || 'Error interno del servidor.' });
     } finally {
         clientDB.release();
     }
 });
 
+
 // Webhook de Mercado Pago
 app.post('/api/payments/webhook', async (req, res) => {
     const { query, body } = req;
-    console.log("Webhook recibido:", { query, body });
+    console.log("Webhook de Mercado Pago recibido:", { query, body });
+
     if (query.type === 'payment' && body.data && body.data.id) {
+        const paymentId = body.data.id;
+        console.log(`Procesando notificación para pago ID: ${paymentId}`);
         try {
-            const payment = await mercadopago.payment.get({ id: body.data.id });
+            const payment = await mercadopago.payment.get({ id: paymentId });
             if (payment && payment.status === 'approved') {
                 const { gameId, userId } = JSON.parse(payment.external_reference);
+                console.log(`Pago aprobado para gameId: ${gameId}, userId: ${userId}`);
                 const clientDB = await pool.connect();
                 try {
                     await clientDB.query('BEGIN');
                     const updateResult = await clientDB.query(
                         `UPDATE game_participants SET payment_status = 'APPROVED', mp_payment_id = $1
                          WHERE game_id = $2 AND user_id = $3 AND payment_status = 'PENDING' RETURNING id`,
-                        [body.data.id, gameId, userId]
+                        [paymentId, gameId, userId]
                     );
                     if (updateResult.rowCount > 0) {
                         await clientDB.query('UPDATE games SET current_players = current_players + 1 WHERE id = $1', [gameId]);
@@ -231,7 +258,7 @@ app.post('/api/payments/webhook', async (req, res) => {
                     await clientDB.query('COMMIT');
                 } catch (dbError) {
                     await clientDB.query('ROLLBACK');
-                    console.error('Error DB en webhook:', dbError);
+                    console.error('Error de DB en webhook:', dbError);
                 } finally {
                     clientDB.release();
                 }
@@ -243,7 +270,8 @@ app.post('/api/payments/webhook', async (req, res) => {
     res.status(200).send('Webhook recibido');
 });
 
-// --- Tareas Programadas y Servidor ---
+
+// --- Lógica de Socket.IO, Tareas Programadas e Inicio del Servidor ---
 io.on('connection', (socket) => {
     console.log(`Usuario conectado: ${socket.id}`);
     socket.on('disconnect', () => console.log(`Usuario desconectado: ${socket.id}`));
@@ -252,11 +280,17 @@ io.on('connection', (socket) => {
 async function setupInitialGames() {
     const today = DateTime.now().setZone("America/Argentina/Buenos_Aires");
     await createDailyGames(today.toJSDate());
-    await createDailyGames(today.plus({ days: 1 }).toJSDate());
+    const tomorrow = today.plus({ days: 1 });
+    await createDailyGames(tomorrow.toJSDate());
 }
 
 setupInitialGames();
-cron.schedule('1 0 * * *', () => createDailyGames(DateTime.now().setZone("America/Argentina/Buenos_Aires").toJSDate()), {
+
+cron.schedule('1 0 * * *', () => {
+    console.log('Ejecutando tarea cron para crear partidas del día siguiente.');
+    const tomorrow = DateTime.now().setZone("America/Argentina/Buenos_Aires").plus({ days: 1 });
+    createDailyGames(tomorrow.toJSDate());
+}, {
     timezone: "America/Argentina/Buenos_Aires"
 });
 
