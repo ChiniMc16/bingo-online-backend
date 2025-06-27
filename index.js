@@ -110,6 +110,80 @@ async function createDailyGames(dateInput) {
     }
 }
 
+// Objeto para mantener el estado de los juegos en progreso
+const activeGames = {};
+
+async function startGame(gameId) {
+    // Evitar iniciar una partida que ya está en curso
+    if (activeGames[gameId]) {
+        console.log(`Intento de iniciar la partida ${gameId}, que ya está en curso.`);
+        return;
+    }
+
+    console.log(`--- INICIANDO PARTIDA ${gameId} ---`);
+
+    try {
+        // 1. Actualizar el estado de la partida en la base de datos a IN_PROGRESS
+        await pool.query("UPDATE games SET status = 'IN_PROGRESS' WHERE id = $1", [gameId]);
+
+        // 2. Preparar el juego
+        const numbersToCall = Array.from({ length: 75 }, (_, i) => i + 1); // Array del 1 al 75
+        const calledNumbers = new Set(); // Usamos un Set para búsquedas rápidas
+
+        // 3. Guardar el estado del juego en memoria
+        activeGames[gameId] = {
+            intervalId: null, // Guardaremos el ID del intervalo para poder detenerlo
+            numbersToCall: numbersToCall,
+            calledNumbers: calledNumbers,
+        };
+        
+        // Notificamos a todos en la sala de la partida que el juego ha comenzado
+        io.to(String(gameId)).emit('gameStarted', { message: `¡La partida #${gameId} ha comenzado!` });
+
+        // 4. Empezar a "cantar" números cada X segundos (ej. cada 5 segundos)
+        activeGames[gameId].intervalId = setInterval(() => {
+            const game = activeGames[gameId];
+
+            if (game.numbersToCall.length === 0) {
+                // Ya se han cantado todos los números
+                endGame(gameId, "Se han cantado todos los números.");
+                return;
+            }
+
+            // Seleccionar un número al azar de los que quedan
+            const randomIndex = Math.floor(Math.random() * game.numbersToCall.length);
+            const newNumber = game.numbersToCall.splice(randomIndex, 1)[0];
+            game.calledNumbers.add(newNumber);
+
+            console.log(`Partida ${gameId}: Cantando número ${newNumber}`);
+
+            // Emitir el nuevo número a todos los jugadores en la sala de la partida
+            io.to(String(gameId)).emit('newNumber', { number: newNumber, calledNumbers: Array.from(game.calledNumbers) });
+
+        }, 5000); // 5000 ms = 5 segundos
+
+    } catch (error) {
+        console.error(`Error al iniciar la partida ${gameId}:`, error);
+    }
+}
+
+// Función para terminar una partida (cuando hay un ganador o se acaban los números)
+function endGame(gameId, reason) {
+    if (!activeGames[gameId]) return;
+
+    console.log(`--- TERMINANDO PARTIDA ${gameId}. Razón: ${reason} ---`);
+    clearInterval(activeGames[gameId].intervalId); // Detenemos el intervalo de "cantar" números
+    
+    io.to(String(gameId)).emit('gameEnded', { message: `La partida ha terminado. ${reason}` });
+
+    // Limpiar el estado del juego de la memoria
+    delete activeGames[gameId];
+
+    // Actualizar el estado en la base de datos a FINISHED
+    pool.query("UPDATE games SET status = 'FINISHED' WHERE id = $1", [gameId])
+        .catch(err => console.error(`Error actualizando estado de partida ${gameId} a FINISHED:`, err));
+}
+
 // --- RUTAS DE LA API ---
 
 // Ruta de prueba
@@ -325,6 +399,25 @@ cron.schedule('1 0 * * *', () => {
     createDailyGames(tomorrow.toJSDate());
 }, {
     timezone: "America/Argentina/Buenos_Aires"
+});
+
+cron.schedule('* * * * *', async () => {
+    console.log('Cron: Verificando partidas a iniciar...');
+    const now = DateTime.now().setZone("America/Argentina/Buenos_Aires");
+
+    try {
+        // Buscamos partidas que estén programadas para empezar en este minuto y aún no han comenzado
+        const result = await pool.query(
+            "SELECT id, scheduled_time FROM games WHERE status = 'SCHEDULED' AND scheduled_time <= $1",
+            [now.toJSDate()]
+        );
+
+        for (const game of result.rows) {
+            startGame(game.id); // ¡Inicia el juego!
+        }
+    } catch (error) {
+        console.error('Cron: Error al verificar partidas a iniciar:', error);
+    }
 });
 
 server.listen(PORT, () => console.log(`Servidor escuchando en puerto ${PORT}`));
