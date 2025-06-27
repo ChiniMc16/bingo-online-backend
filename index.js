@@ -202,7 +202,7 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
         const initPoint = mpResponse.sandbox_init_point || mpResponse.init_point;
         if (!initPoint) throw new Error("Mercado Pago no devolvió una URL de pago válida.");
 
-        const deepLinkUrl = `mercadopago://checkout/v1?
+        const deepLinkUrl = `mercadopago://checkout/v1/beta?
         preference_id=${preferenceId}`;
 
         console.log(`Deep Link (formato alternativo) generado: ${deepLinkUrl}`);
