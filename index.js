@@ -179,7 +179,7 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
 
         if (!game) throw new Error('Partida no encontrada.');
         if (game.status !== 'SCHEDULED') throw new Error('El registro para esta partida no está abierto.');
-        if (DateTime.now() > DateTime.fromJSDate(game.scheduled_time)) throw new Error('El registro para esta partida ya ha cerrado.');
+        //if (DateTime.now() > DateTime.fromJSDate(game.scheduled_time)) throw new Error('El registro para esta partida ya ha cerrado.');
         if (game.current_players >= game.max_players) throw new Error('La partida está llena.');
         
         const existingRegistration = await clientDB.query('SELECT * FROM game_participants WHERE game_id = $1 AND user_id = $2', [gameId, userId]);
