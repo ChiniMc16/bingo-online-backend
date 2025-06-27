@@ -245,14 +245,30 @@ app.post('/api/payments/webhook', async (req, res) => {
     const { query, body } = req;
     console.log("Webhook de Mercado Pago recibido:", { query, body });
 
+    // Nos interesa la notificación de tipo 'payment'
     if (query.type === 'payment' && body.data && body.data.id) {
         const paymentId = body.data.id;
         console.log(`Procesando notificación para pago ID: ${paymentId}`);
+        
         try {
-            const payment = await mercadopago.payment.get({ id: paymentId });
+            // --- ¡AQUÍ ESTÁ LA CORRECCIÓN! ---
+            // 1. Creamos una instancia del controlador de Pagos usando nuestro cliente.
+            const paymentController = new mercadopago.Payment(mpClient);
+            
+            // 2. Usamos esa instancia para obtener los detalles del pago.
+            const payment = await paymentController.get({ id: paymentId });
+
+            console.log("Respuesta de la API de MP sobre el pago:", payment);
+
             if (payment && payment.status === 'approved') {
-                const { gameId, userId } = JSON.parse(payment.external_reference);
+                const { external_reference } = payment;
+                if (!external_reference) {
+                    throw new Error(`El pago ${paymentId} no tiene external_reference.`);
+                }
+
+                const { gameId, userId } = JSON.parse(external_reference);
                 console.log(`Pago aprobado para gameId: ${gameId}, userId: ${userId}`);
+
                 const clientDB = await pool.connect();
                 try {
                     await clientDB.query('BEGIN');
@@ -262,7 +278,10 @@ app.post('/api/payments/webhook', async (req, res) => {
                         [paymentId, gameId, userId]
                     );
                     if (updateResult.rowCount > 0) {
-                        await clientDB.query('UPDATE games SET current_players = current_players + 1 WHERE id = $1', [gameId]);
+                        await clientDB.query(
+                            'UPDATE games SET current_players = current_players + 1 WHERE id = $1',
+                            [gameId]
+                        );
                         console.log(`Usuario ${userId} confirmado en partida ${gameId}.`);
                     }
                     await clientDB.query('COMMIT');
@@ -272,11 +291,15 @@ app.post('/api/payments/webhook', async (req, res) => {
                 } finally {
                     clientDB.release();
                 }
+            } else {
+                console.log(`El pago ${paymentId} no fue aprobado. Estado: ${payment?.status}`);
             }
         } catch (error) {
-            console.error('Error consultando pago en MP:', error);
+            console.error('Error al consultar el pago en MP:', error);
         }
     }
+    
+    // Siempre responder con 200 OK a Mercado Pago
     res.status(200).send('Webhook recibido');
 });
 
