@@ -393,8 +393,38 @@ app.post('/api/payments/webhook', async (req, res) => {
 
 // --- Lógica de Socket.IO, Tareas Programadas e Inicio del Servidor ---
 io.on('connection', (socket) => {
-    console.log(`Usuario conectado: ${socket.id}`);
-    socket.on('disconnect', () => console.log(`Usuario desconectado: ${socket.id}`));
+    // Este código solo se ejecuta si el middleware de autenticación fue exitoso
+    console.log(`Usuario autenticado y conectado: ${socket.user.username} (ID: ${socket.id})`);
+
+    socket.on('disconnect', () => {
+        console.log(`Usuario desconectado: ${socket.user.username}`);
+    });
+
+    socket.on('joinGame', async (gameId) => {
+        socket.join(String(gameId));
+        console.log(`Usuario ${socket.user.username} se unió al juego ${gameId}`);
+        socket.emit('gameStatus', { message: `¡Bienvenido al juego ${gameId}!` });
+
+        try {
+            // ¡YA NO NECESITAMOS UN FAKE_USER_ID! Usamos el ID del usuario autenticado.
+            const userId = socket.user.id; 
+            const result = await pool.query(
+                'SELECT card_numbers FROM game_participants WHERE game_id = $1 AND user_id = $2',
+                [gameId, userId]
+            );
+
+            if (result.rows.length > 0) {
+                const userCards = result.rows[0].card_numbers;
+                socket.emit('yourCards', { cards: userCards });
+                console.log(`Cartones enviados al usuario ${socket.user.username} para la partida ${gameId}`);
+            } else {
+                socket.emit('gameError', { message: 'No se encontraron tus cartones para esta partida.' });
+            }
+        } catch (error) {
+            console.error('Error al obtener los cartones del usuario:', error);
+            socket.emit('gameError', { message: 'Error al obtener tus cartones.' });
+        }
+    });
 });
 
 async function setupInitialGames() {
