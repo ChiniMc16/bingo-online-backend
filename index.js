@@ -231,10 +231,23 @@ app.post('/api/login', async (req, res) => {
 
 // Rutas de Partidas
 app.get('/api/games', authenticateToken, async (req, res) => {
+    
     try {
-        const games = await pool.query(`SELECT * FROM games WHERE scheduled_time >= NOW() ORDER BY scheduled_time ASC`);
+        const userId = req.user.id;
+        // Consulta que une games con game_participants para saber si el usuario actual está registrado
+        const query = `
+            SELECT 
+                g.*,
+                CASE WHEN p.user_id IS NOT NULL AND p.payment_status = 'APPROVED' THEN true ELSE false END AS is_registered
+            FROM games g
+            LEFT JOIN game_participants p ON g.id = p.game_id AND p.user_id = $1
+            WHERE g.scheduled_time >= NOW()
+            ORDER BY g.scheduled_time ASC
+        `;
+        const games = await pool.query(query, [userId]);
         res.json(games.rows);
-    } catch (error) {
+    } 
+    catch (error) {
         console.error('Error al obtener partidas:', error);
         res.status(500).json({ message: 'Error interno al obtener partidas.' });
     }
