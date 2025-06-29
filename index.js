@@ -326,56 +326,63 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
     }
 });
 
-const approvedPayments = new Set();
+
+// En index.js, la ruta del webhook
 
 app.post('/api/payments/webhook', async (req, res) => {
     const { query, body } = req;
     console.log("Webhook recibido:", { query, body });
 
-    try {
-        // --- PROCESAMOS PRIMERO LA NOTIFICACIÓN DE PAGO ---
-        if (query.type === 'payment' || body.type === 'payment') {
-            const paymentId = body.data?.id || query['data.id'];
-            if (paymentId) {
-                console.log(`Webhook de PAGO recibido. Verificando estado para ID: ${paymentId}`);
-                const paymentController = new mercadopago.Payment(mpClient);
-                const payment = await paymentController.get({ id: paymentId });
-                
-                // Si el pago está aprobado, guardamos su ID para usarlo después.
-                if (payment && payment.status === 'approved') {
-                    console.log(`Pago ${paymentId} está APROBADO. Guardando ID temporalmente.`);
-                    approvedPayments.add(paymentId);
+    // Nos interesa la notificación de TIPO PAGO
+    if (query.type === 'payment' && body.data && body.data.id) {
+        const paymentId = body.data.id;
+        console.log(`Webhook de PAGO recibido. Procesando ID: ${paymentId}`);
+        
+        try {
+            // CONSULTAMOS EL PAGO
+            const paymentController = new mercadopago.Payment(mpClient);
+            const payment = await paymentController.get({ id: paymentId });
+            
+            // Si la API devuelve el pago y está aprobado, procesamos
+            if (payment && payment.status === 'approved') {
+                const orderId = payment.order?.id;
+                if (!orderId) {
+                    throw new Error(`El pago ${paymentId} aprobado no tiene una orden asociada.`);
                 }
-            }
-        }
-
-        // --- PROCESAMOS LA NOTIFICACIÓN DE LA ORDEN DE COMPRA ---
-        if (body.topic === 'merchant_order' || query.topic === 'merchant_order') {
-            const orderId = body.resource?.match(/\d+$/)?.[0] || query.id;
-            if (orderId) {
-                console.log(`Webhook de ORDEN recibido. Procesando ID: ${orderId}`);
+                
+                // Consultamos la orden para obtener el external_reference
                 const orderController = new mercadopago.MerchantOrder(mpClient);
                 const order = await orderController.get({ merchantOrderId: orderId });
-                
-                // Buscamos un pago en la orden que coincida con nuestros pagos aprobados
-                const paymentInOrder = order.payments?.find(p => approvedPayments.has(p.id.toString()));
 
-                if (paymentInOrder) {
-                    console.log(`¡Coincidencia encontrada! Procesando pago ${paymentInOrder.id} para la orden ${orderId}`);
-                    // Ahora sí, llamamos a nuestra lógica de base de datos
-                    await processApprovedPayment(paymentInOrder, order.external_reference);
-                    // Limpiamos el ID de pago para no procesarlo dos veces
-                    approvedPayments.delete(paymentInOrder.id.toString());
+                if (order.external_reference) {
+                    await processApprovedPayment(payment, order.external_reference);
                 } else {
-                    console.log(`La orden ${orderId} no tiene (todavía) un pago aprobado que conozcamos.`);
+                     throw new Error(`La orden ${orderId} no tiene external_reference.`);
                 }
+            } else {
+                console.log(`Pago ${paymentId} no fue aprobado o no se encontró, estado: ${payment?.status}`);
+            }
+
+        } catch (error) {
+            // MANEJO DEL ERROR 404 - ESTA ES LA LÓGICA CLAVE
+            if (error.status === 404) {
+                console.warn(`Payment ${paymentId} no encontrado (404), pero la notificación es válida. Asumimos pago aprobado para flujo de Sandbox.`);
+                // Este es un workaround para la inconsistencia del Sandbox.
+                // NO PODEMOS saber la 'external_reference' si la API nos da 404.
+                // El problema está en el flujo, el usuario se registra pero no podemos confirmar.
+                // La solución REAL es que la API de Sandbox funcione.
+                // Como workaround temporal, podríamos buscar en nuestra DB por preference_id, pero no lo tenemos aquí.
+                // Lo que SÍ podemos hacer es asumir que la ÚLTIMA interacción fue de este usuario. Es arriesgado.
+                
+                // Dejemoslo como un error logueado por ahora, indicando el problema del sandbox.
+                console.error("No se puede procesar el webhook debido al error 404 del Sandbox de Mercado Pago.");
+
+            } else {
+                 console.error('Error procesando webhook de pago:', error);
             }
         }
-    } catch (error) {
-        console.error("Error procesando webhook:", error);
     }
-    
-    // Siempre responder OK
+
     res.status(200).send('Webhook recibido');
 });
 
