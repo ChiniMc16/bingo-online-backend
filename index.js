@@ -563,3 +563,15 @@ cron.schedule('* * * * *', async () => {
 });
 
 server.listen(PORT, () => console.log(`Servidor escuchando en puerto ${PORT}`));
+
+(async () => {
+    try {
+        const result = await pool.query(`
+            ALTER TABLE game_participants
+            ADD COLUMN IF NOT EXISTS mp_payment_id VARCHAR(255);
+        `);
+        console.log("Columna 'mp_payment_id' añadida (si no existía).");
+    } catch (err) {
+        console.error("Error al añadir columna mp_payment_id:", err);
+    }
+})();
