@@ -332,92 +332,95 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
 
 // En tu index.js, reemplaza la ruta del webhook
 
+// En tu archivo index.js, reemplaza la ruta del webhook
+
 app.post('/api/payments/webhook', async (req, res) => {
     const { query, body } = req;
     console.log("Webhook recibido:", { query, body });
 
-    // Verificamos si la notificación es sobre una ORDEN DE COMPRA (merchant_order)
+    // Nos centramos en la notificación de 'merchant_order'
     if (body.topic === 'merchant_order' || query.topic === 'merchant_order') {
         const orderId = body.resource?.match(/\d+$/)?.[0] || query.id;
         
         if (!orderId) {
-            console.log("No se pudo extraer el ID de la orden del webhook.");
+            console.log("Webhook de Orden sin ID, ignorando.");
             return res.status(200).send('OK');
         }
 
-        console.log(`Procesando notificación para la Orden de Compra ID: ${orderId}`);
+        console.log(`Procesando Orden de Compra ID: ${orderId}`);
 
-        try {
-            // Creamos una instancia del controlador de órdenes
-            const orderController = new mercadopago.MerchantOrder(mpClient);
-            const order = await orderController.get({ merchantOrderId: orderId });
-            
-            console.log(`Detalles de la Orden ${orderId}:`, order);
-
-            // Buscamos si la orden tiene algún pago APROBADO
-            const approvedPayment = order.payments?.find(p => p.status === 'approved');
-
-            if (approvedPayment) {
-                console.log(`Pago aprobado encontrado en la orden: ${approvedPayment.id}`);
-                
-                // Ahora usamos el external_reference de la ORDEN, que es el mismo que el de la preferencia.
-                const externalReference = order.external_reference;
-                if (!externalReference) {
-                    throw new Error(`La orden ${orderId} no tiene external_reference.`);
-                }
-                
-                // Y desde aquí, la lógica es la misma que ya teníamos.
-                processApprovedPayment({ 
-                    id: approvedPayment.id,
-                    status: approvedPayment.status,
-                    external_reference: externalReference 
-                });
-            } else {
-                console.log(`La orden ${orderId} aún no tiene pagos aprobados.`);
-            }
-
-        } catch (error) {
-            console.error(`Error al procesar la orden ${orderId}:`, error);
-        }
+        // Usamos una función separada para la lógica, para poder reintentarla.
+        processMerchantOrder(orderId, 3); // Intentamos hasta 3 veces
     }
     
-    // Respondemos OK a cualquier notificación para que MP no siga intentando.
     res.status(200).send('Webhook recibido');
 });
 
-// --- ¡NUEVA FUNCIÓN AUXILIAR! ---
-// Extraemos la lógica de negocio a una función para no duplicar código
-async function processApprovedPayment(payment) {
-    if (payment && payment.status === 'approved') {
-        const { external_reference } = payment;
-        if (!external_reference) throw new Error(`El pago ${payment.id} no tiene external_reference.`);
-        
-        const { gameId, userId } = JSON.parse(external_reference);
-        console.log(`Pago APROBADO para gameId: ${gameId}, userId: ${userId}`);
-        
-        const clientDB = await pool.connect();
-        try {
-            await clientDB.query('BEGIN');
-            const updateResult = await clientDB.query(
-                `UPDATE game_participants SET payment_status = 'APPROVED', mp_payment_id = $1
-                 WHERE game_id = $2 AND user_id = $3 AND payment_status = 'PENDING' RETURNING id`,
-                [payment.id, gameId, userId]
-            );
+// --- ¡NUEVA FUNCIÓN ASÍNCRONA CON REINTENTOS! ---
+async function processMerchantOrder(orderId, retriesLeft) {
+    if (retriesLeft <= 0) {
+        console.error(`No se pudo procesar la orden ${orderId} después de varios intentos.`);
+        return;
+    }
 
-            if (updateResult.rowCount > 0) {
-                await clientDB.query(
-                    'UPDATE games SET current_players = current_players + 1 WHERE id = $1',
-                    [gameId]
-                );
-                console.log(`Usuario ${userId} confirmado en partida ${gameId}.`);
-            }
-            await clientDB.query('COMMIT');
-        } catch (dbError) {
-            await clientDB.query('ROLLBACK');
-            console.error('Error de DB en webhook:', dbError);
-        } finally {
-            clientDB.release();
+    try {
+        const orderController = new mercadopago.MerchantOrder(mpClient);
+        const order = await orderController.get({ merchantOrderId: orderId });
+
+        const approvedPayment = order.payments?.find(p => p.status === 'approved');
+
+        if (approvedPayment) {
+            // ¡ÉXITO! Encontramos un pago aprobado.
+            console.log(`Pago aprobado ${approvedPayment.id} encontrado en la orden ${orderId}.`);
+            await processApprovedPayment(approvedPayment, order.external_reference);
+        } else {
+            // Si no hay pago aprobado, es el problema de timing.
+            console.log(`La orden ${orderId} aún no tiene pagos aprobados. Reintentando en 5 segundos... (Intentos restantes: ${retriesLeft - 1})`);
+            setTimeout(() => {
+                processMerchantOrder(orderId, retriesLeft - 1);
+            }, 5000); // 5 segundos de espera
         }
+
+    } catch (error) {
+        console.error(`Error al procesar la orden ${orderId}:`, error);
+    }
+}
+
+
+// --- TU FUNCIÓN AUXILIAR MODIFICADA ---
+// Ahora recibe el external_reference como parámetro
+async function processApprovedPayment(payment, externalReference) {
+    if (!externalReference) {
+        console.error(`El pago ${payment.id} no tiene external_reference en la orden.`);
+        return;
+    }
+        
+    const { gameId, userId } = JSON.parse(externalReference);
+    console.log(`Actualizando DB para gameId: ${gameId}, userId: ${userId}`);
+    
+    const clientDB = await pool.connect();
+    try {
+        await clientDB.query('BEGIN');
+        const updateResult = await clientDB.query(
+            `UPDATE game_participants SET payment_status = 'APPROVED', mp_payment_id = $1
+             WHERE game_id = $2 AND user_id = $3 AND payment_status = 'PENDING' RETURNING id`,
+            [payment.id, gameId, userId]
+        );
+        if (updateResult.rowCount > 0) {
+            await clientDB.query(
+                'UPDATE games SET current_players = current_players + 1 WHERE id = $1',
+                [gameId]
+            );
+            console.log(`Usuario ${userId} confirmado en partida ${gameId}.`);
+        } else {
+            console.log(`El pago ${payment.id} ya fue procesado o no se encontró participante en PENDING.`);
+        }
+        await clientDB.query('COMMIT');
+    } catch (dbError) {
+        await clientDB.query('ROLLBACK');
+        console.error('Error de DB en webhook:', dbError);
+    } finally {
+        clientDB.release();
     }
 }
 
