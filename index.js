@@ -328,31 +328,52 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
 
 
 // Webhook de Mercado Pago
-// En tu archivo index.js, reemplaza la ruta del webhook
-
-// En tu index.js, reemplaza la ruta del webhook
-
-// En tu archivo index.js, reemplaza la ruta del webhook
-
 app.post('/api/payments/webhook', async (req, res) => {
     const { query, body } = req;
     console.log("Webhook recibido:", { query, body });
 
-    // Nos centramos en la notificación de 'merchant_order'
-    if (body.topic === 'merchant_order' || query.topic === 'merchant_order') {
-        const orderId = body.resource?.match(/\d+$/)?.[0] || query.id;
-        
-        if (!orderId) {
-            console.log("Webhook de Orden sin ID, ignorando.");
-            return res.status(200).send('OK');
+    // --- NUEVA LÓGICA HÍBRIDA ---
+    // Nos interesa PRINCIPALMENTE la notificación de tipo 'payment'
+    if (query.type === 'payment' && body.data && body.data.id) {
+        const paymentId = body.data.id;
+        console.log(`Webhook de PAGO recibido. Procesando ID: ${paymentId}`);
+
+        try {
+            // Verificamos el estado de este pago.
+            const paymentController = new mercadopago.Payment(mpClient);
+            const payment = await paymentController.get({ id: paymentId });
+
+            if (payment && payment.status === 'approved') {
+                // Si el pago está aprobado, buscamos la orden asociada
+                const orderId = payment.order?.id;
+                if (!orderId) {
+                    console.error(`El pago ${paymentId} no tiene una orden asociada. No se puede procesar.`);
+                    return res.status(200).send('OK');
+                }
+                
+                // Consultamos la orden para obtener el 'external_reference'
+                const orderController = new mercadopago.MerchantOrder(mpClient);
+                const order = await orderController.get({ merchantOrderId: orderId });
+                
+                if (!order.external_reference) {
+                    console.error(`La orden ${orderId} asociada al pago no tiene external_reference.`);
+                    return res.status(200).send('OK');
+                }
+                
+                // Con todos los datos, llamamos a nuestra función de lógica de negocio.
+                await processApprovedPayment({ 
+                    id: payment.id,
+                    status: payment.status,
+                    external_reference: order.external_reference
+                });
+            }
+        } catch (error) {
+            console.error(`Error al procesar el webhook del pago ${paymentId}:`, error);
         }
-
-        console.log(`Procesando Orden de Compra ID: ${orderId}`);
-
-        // Usamos una función separada para la lógica, para poder reintentarla.
-        processMerchantOrder(orderId, 3); // Intentamos hasta 3 veces
+    } else {
+        console.log("Notificación de webhook ignorada (no es de tipo 'payment').");
     }
-    
+
     res.status(200).send('Webhook recibido');
 });
 
