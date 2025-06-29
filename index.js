@@ -238,10 +238,10 @@ app.get('/api/games', authenticateToken, async (req, res) => {
         const query = `
             SELECT 
                 g.*,
-                CASE WHEN p.user_id IS NOT NULL AND p.payment_status = 'APPROVED' THEN true ELSE false END AS is_registered
+                CASE WHEN p.user_id IS NOT NULL AND p.payment_status = 'APPROVED' THEN true ELSE false END AS is_user_registered
             FROM games g
             LEFT JOIN game_participants p ON g.id = p.game_id AND p.user_id = $1
-            WHERE g.scheduled_time >= NOW()
+            WHERE g.scheduled_time >= NOW() - interval '3 hours' -- Muestra partidas incluso si empezaron hace poco
             ORDER BY g.scheduled_time ASC
         `;
         const games = await pool.query(query, [userId]);
