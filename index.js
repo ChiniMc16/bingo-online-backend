@@ -326,56 +326,59 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
     }
 });
 
+const approvedPayments = new Set();
 
-// Webhook de Mercado Pago
 app.post('/api/payments/webhook', async (req, res) => {
     const { query, body } = req;
     console.log("Webhook recibido:", { query, body });
 
-    // --- NUEVA LÓGICA HÍBRIDA ---
-    // Nos interesa PRINCIPALMENTE la notificación de tipo 'payment'
-    if (query.type === 'payment' && body.data && body.data.id) {
-        const paymentId = body.data.id;
-        console.log(`Webhook de PAGO recibido. Procesando ID: ${paymentId}`);
-
-        try {
-            // Verificamos el estado de este pago.
-            const paymentController = new mercadopago.Payment(mpClient);
-            const payment = await paymentController.get({ id: paymentId });
-
-            if (payment && payment.status === 'approved') {
-                // Si el pago está aprobado, buscamos la orden asociada
-                const orderId = payment.order?.id;
-                if (!orderId) {
-                    console.error(`El pago ${paymentId} no tiene una orden asociada. No se puede procesar.`);
-                    return res.status(200).send('OK');
-                }
+    try {
+        // --- PROCESAMOS PRIMERO LA NOTIFICACIÓN DE PAGO ---
+        if (query.type === 'payment' || body.type === 'payment') {
+            const paymentId = body.data?.id || query['data.id'];
+            if (paymentId) {
+                console.log(`Webhook de PAGO recibido. Verificando estado para ID: ${paymentId}`);
+                const paymentController = new mercadopago.Payment(mpClient);
+                const payment = await paymentController.get({ id: paymentId });
                 
-                // Consultamos la orden para obtener el 'external_reference'
+                // Si el pago está aprobado, guardamos su ID para usarlo después.
+                if (payment && payment.status === 'approved') {
+                    console.log(`Pago ${paymentId} está APROBADO. Guardando ID temporalmente.`);
+                    approvedPayments.add(paymentId);
+                }
+            }
+        }
+
+        // --- PROCESAMOS LA NOTIFICACIÓN DE LA ORDEN DE COMPRA ---
+        if (body.topic === 'merchant_order' || query.topic === 'merchant_order') {
+            const orderId = body.resource?.match(/\d+$/)?.[0] || query.id;
+            if (orderId) {
+                console.log(`Webhook de ORDEN recibido. Procesando ID: ${orderId}`);
                 const orderController = new mercadopago.MerchantOrder(mpClient);
                 const order = await orderController.get({ merchantOrderId: orderId });
                 
-                if (!order.external_reference) {
-                    console.error(`La orden ${orderId} asociada al pago no tiene external_reference.`);
-                    return res.status(200).send('OK');
-                }
-                
-                // Con todos los datos, llamamos a nuestra función de lógica de negocio.
-                await processApprovedPayment({ 
-                    id: payment.id,
-                    status: payment.status,
-                    external_reference: order.external_reference
-                });
-            }
-        } catch (error) {
-            console.error(`Error al procesar el webhook del pago ${paymentId}:`, error);
-        }
-    } else {
-        console.log("Notificación de webhook ignorada (no es de tipo 'payment').");
-    }
+                // Buscamos un pago en la orden que coincida con nuestros pagos aprobados
+                const paymentInOrder = order.payments?.find(p => approvedPayments.has(p.id.toString()));
 
+                if (paymentInOrder) {
+                    console.log(`¡Coincidencia encontrada! Procesando pago ${paymentInOrder.id} para la orden ${orderId}`);
+                    // Ahora sí, llamamos a nuestra lógica de base de datos
+                    await processApprovedPayment(paymentInOrder, order.external_reference);
+                    // Limpiamos el ID de pago para no procesarlo dos veces
+                    approvedPayments.delete(paymentInOrder.id.toString());
+                } else {
+                    console.log(`La orden ${orderId} no tiene (todavía) un pago aprobado que conozcamos.`);
+                }
+            }
+        }
+    } catch (error) {
+        console.error("Error procesando webhook:", error);
+    }
+    
+    // Siempre responder OK
     res.status(200).send('Webhook recibido');
 });
+
 
 // --- ¡NUEVA FUNCIÓN ASÍNCRONA CON REINTENTOS! ---
 async function processMerchantOrder(orderId, retriesLeft) {
@@ -434,7 +437,7 @@ async function processApprovedPayment(payment, externalReference) {
             );
             console.log(`Usuario ${userId} confirmado en partida ${gameId}.`);
         } else {
-            console.log(`El pago ${payment.id} ya fue procesado o no se encontró participante en PENDING.`);
+            console.log(`El pago ${payment.id} ya fue procesado.`);
         }
         await clientDB.query('COMMIT');
     } catch (dbError) {
