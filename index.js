@@ -330,44 +330,58 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
 // Webhook de Mercado Pago
 // En tu archivo index.js, reemplaza la ruta del webhook
 
+// En tu index.js, reemplaza la ruta del webhook
+
 app.post('/api/payments/webhook', async (req, res) => {
     const { query, body } = req;
     console.log("Webhook recibido:", { query, body });
 
-    if (query.type === 'payment' && body.data && body.data.id) {
-        const paymentId = body.data.id;
-        console.log(`Procesando notificación para pago ID: ${paymentId}`);
+    // Verificamos si la notificación es sobre una ORDEN DE COMPRA (merchant_order)
+    if (body.topic === 'merchant_order' || query.topic === 'merchant_order') {
+        const orderId = body.resource?.match(/\d+$/)?.[0] || query.id;
         
+        if (!orderId) {
+            console.log("No se pudo extraer el ID de la orden del webhook.");
+            return res.status(200).send('OK');
+        }
+
+        console.log(`Procesando notificación para la Orden de Compra ID: ${orderId}`);
+
         try {
-            const paymentController = new mercadopago.Payment(mpClient);
-            const payment = await paymentController.get({ id: paymentId });
+            // Creamos una instancia del controlador de órdenes
+            const orderController = new mercadopago.MerchantOrder(mpClient);
+            const order = await orderController.get({ merchantOrderId: orderId });
+            
+            console.log(`Detalles de la Orden ${orderId}:`, order);
 
-            console.log("Respuesta inicial de la API de MP:", payment);
+            // Buscamos si la orden tiene algún pago APROBADO
+            const approvedPayment = order.payments?.find(p => p.status === 'approved');
 
-            // Si el pago se procesa correctamente, continúa
-            processApprovedPayment(payment);
+            if (approvedPayment) {
+                console.log(`Pago aprobado encontrado en la orden: ${approvedPayment.id}`);
+                
+                // Ahora usamos el external_reference de la ORDEN, que es el mismo que el de la preferencia.
+                const externalReference = order.external_reference;
+                if (!externalReference) {
+                    throw new Error(`La orden ${orderId} no tiene external_reference.`);
+                }
+                
+                // Y desde aquí, la lógica es la misma que ya teníamos.
+                processApprovedPayment({ 
+                    id: approvedPayment.id,
+                    status: approvedPayment.status,
+                    external_reference: externalReference 
+                });
+            } else {
+                console.log(`La orden ${orderId} aún no tiene pagos aprobados.`);
+            }
 
         } catch (error) {
-            // --- ¡NUEVA LÓGICA DE MANEJO DE ERROR! ---
-            if (error.status === 404) {
-                console.log(`Pago ${paymentId} no encontrado en el primer intento. Reintentando en 3 segundos...`);
-                // Esperamos 3 segundos para darle tiempo a la API de MP de actualizarse
-                setTimeout(async () => {
-                    try {
-                        const paymentController = new mercadopago.Payment(mpClient);
-                        const payment = await paymentController.get({ id: paymentId });
-                        console.log("Respuesta de la API de MP en el reintento:", payment);
-                        processApprovedPayment(payment);
-                    } catch (retryError) {
-                        console.error(`Error en el reintento para el pago ${paymentId}:`, retryError);
-                    }
-                }, 3000); // 3000 ms = 3 segundos
-            } else {
-                console.error(`Error al consultar el pago ${paymentId} en MP:`, error);
-            }
+            console.error(`Error al procesar la orden ${orderId}:`, error);
         }
     }
-
+    
+    // Respondemos OK a cualquier notificación para que MP no siga intentando.
     res.status(200).send('Webhook recibido');
 });
 
