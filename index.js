@@ -489,6 +489,25 @@ async function processApprovedPayment(payment, externalReference) {
     }
 }
 
+io.use((socket, next) => {
+    const token = socket.handshake.auth?.token;
+    if (!token) {
+        return next(new Error("Token no proporcionado"));
+    }
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        socket.user = {
+            id: decoded.id,
+            username: decoded.username,
+            email: decoded.email
+        };
+        next();
+    } catch (err) {
+        console.error("Error de autenticación en Socket.IO:", err.message);
+        next(new Error("Token inválido"));
+    }
+});
 
 // --- Lógica de Socket.IO, Tareas Programadas e Inicio del Servidor ---
 io.on('connection', (socket) => {
@@ -525,6 +544,8 @@ io.on('connection', (socket) => {
         }
     });
 });
+
+
 
 async function setupInitialGames() {
     const today = DateTime.now().setZone("America/Argentina/Buenos_Aires");
