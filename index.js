@@ -1,69 +1,76 @@
-// index.js (Versión Final, Única y Corregida)
-
-require('dotenv').config();
+require('dotenv').config(); // Carga las variables de entorno desde .env
 
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const { Pool } = require('pg');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const cron = require('node-cron');
-const mercadopago = require('mercadopago');
-const { DateTime } = require('luxon');
+const { Pool } = require('pg'); // Cliente de PostgreSQL
+const bcrypt = require('bcryptjs'); // Para el hashing seguro de contraseñas
+const jwt = require('jsonwebtoken'); // Para generar y verificar tokens JWT
+const cron = require('node-cron'); // Para programar tareas diarias
+const mercadopago = require('mercadopago'); // SDK de Mercado Pago
+const { DateTime } = require('luxon'); // Para manejo avanzado de fechas y zonas horarias
 
+// --- CONFIGURACIÓN PRINCIPAL ---
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: {
-        origin: "*", // Para desarrollo.
-        methods: ["GET", "POST"]
+    cors: { 
+        origin: "*", // Permite conexiones desde cualquier origen (para desarrollo). ¡CAMBIAR EN PRODUCCIÓN!
+        methods: ["GET", "POST"] 
+    }
+});
+const PORT = process.env.PORT || 3000; // Puerto del servidor, Railway lo asignará a process.env.PORT
+
+// --- CONFIGURACIÓN DE BASE DE DATOS PARA RAILWAY ---
+// Railway proporciona una URL de conexión única para PostgreSQL a través de DATABASE_URL
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL, // Usa la DATABASE_URL de Railway
+    ssl: {
+        rejectUnauthorized: false // A menudo necesario en servicios en la nube como Railway
     }
 });
 
-const PORT = process.env.PORT || 3000;
-
-// Configuración de la Base de Datos
-const pool = new Pool({
-    user: process.env.DB_USER,
-    host: process.env.DB_HOST,
-    database: process.env.DB_DATABASE,
-    password: process.env.DB_PASSWORD,
-    port: process.env.DB_PORT,
-});
-
-// Constantes del Juego
+// --- CONSTANTES Y CONFIGURACIÓN DE TERCEROS ---
 const GAME_TIMES = ['20:00', '22:00'];
 const MAX_PLAYERS_PER_GAME = 100;
-const ENTRY_FEE = 1000.00;
+const ENTRY_FEE = 1000.00; // Costo de entrada por partida
 
-// Configuración de Mercado Pago
 const mpClient = new mercadopago.MercadoPagoConfig({
-    accessToken: process.env.MP_ACCESS_TOKEN,
+    accessToken: process.env.MP_ACCESS_TOKEN, // Access Token de Mercado Pago (vendedor de prueba)
 });
 
-// Middlewares de Express
-app.use(cors());
-app.use(express.json());
+// --- MIDDLEWARES ---
+app.use(cors()); // Habilita CORS
+app.use(express.json()); // Habilita el parsing de JSON en las peticiones
 
-// --- Middleware de Autenticación JWT ---
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
-    if (token == null) return res.sendStatus(401);
+    if (!token) return res.sendStatus(401); // No autorizado si no hay token
 
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) {
-            console.error("Token JWT inválido:", err.message);
-            return res.sendStatus(403);
-        }
-        req.user = user;
+        if (err) return res.sendStatus(403); // Prohibido si el token es inválido
+        req.user = user; // Guarda el usuario decodificado en la request
         next();
     });
 };
 
-// --- Funciones de Lógica de Juego ---
+io.use((socket, next) => {
+    const token = socket.handshake.auth?.token;
+    if (!token) return next(new Error("Token no proporcionado"));
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        socket.user = decoded; // Adjunta la información del usuario al socket
+        next();
+    } catch (err) {
+        next(new Error("Token inválido"));
+    }
+});
+
+
+// --- FUNCIONES DE LÓGICA DE JUEGO ---
 function generateBingoCard() {
     const columns = { 'B': [], 'I': [], 'N': [], 'G': [], 'O': [] };
     function fillColumn(start, end, count) {
@@ -97,6 +104,7 @@ async function createDailyGames(dateInput) {
         const existingGame = await pool.query('SELECT id FROM games WHERE scheduled_time = $1', [scheduledTime.toJSDate()]);
         if (existingGame.rows.length === 0) {
             try {
+                // El registro abre y cierra al mismo tiempo que la partida para simplificar, pero puedes cambiarlo.
                 await pool.query(
                     `INSERT INTO games (scheduled_time, registration_open_at, registration_close_at, max_players, entry_fee, status)
                      VALUES ($1, $1, $1, $2, $3, $4)`,
@@ -110,11 +118,9 @@ async function createDailyGames(dateInput) {
     }
 }
 
-// Objeto para mantener el estado de los juegos en progreso
-const activeGames = {};
+const activeGames = {}; // Objeto para mantener el estado de los juegos en progreso
 
 async function startGame(gameId) {
-    // Evitar iniciar una partida que ya está en curso
     if (activeGames[gameId]) {
         console.log(`Intento de iniciar la partida ${gameId}, que ya está en curso.`);
         return;
@@ -123,73 +129,57 @@ async function startGame(gameId) {
     console.log(`--- INICIANDO PARTIDA ${gameId} ---`);
 
     try {
-        // 1. Actualizar el estado de la partida en la base de datos a IN_PROGRESS
         await pool.query("UPDATE games SET status = 'IN_PROGRESS' WHERE id = $1", [gameId]);
+        const numbersToCall = Array.from({ length: 75 }, (_, i) => i + 1);
+        const calledNumbers = new Set();
 
-        // 2. Preparar el juego
-        const numbersToCall = Array.from({ length: 75 }, (_, i) => i + 1); // Array del 1 al 75
-        const calledNumbers = new Set(); // Usamos un Set para búsquedas rápidas
-
-        // 3. Guardar el estado del juego en memoria
         activeGames[gameId] = {
-            intervalId: null, // Guardaremos el ID del intervalo para poder detenerlo
+            intervalId: null,
             numbersToCall: numbersToCall,
             calledNumbers: calledNumbers,
         };
         
-        // Notificamos a todos en la sala de la partida que el juego ha comenzado
         io.to(String(gameId)).emit('gameStarted', { message: `¡La partida #${gameId} ha comenzado!` });
 
-        // 4. Empezar a "cantar" números cada X segundos (ej. cada 5 segundos)
         activeGames[gameId].intervalId = setInterval(() => {
             const game = activeGames[gameId];
 
             if (game.numbersToCall.length === 0) {
-                // Ya se han cantado todos los números
                 endGame(gameId, "Se han cantado todos los números.");
                 return;
             }
 
-            // Seleccionar un número al azar de los que quedan
             const randomIndex = Math.floor(Math.random() * game.numbersToCall.length);
             const newNumber = game.numbersToCall.splice(randomIndex, 1)[0];
             game.calledNumbers.add(newNumber);
 
             console.log(`Partida ${gameId}: Cantando número ${newNumber}`);
-
-            // Emitir el nuevo número a todos los jugadores en la sala de la partida
             io.to(String(gameId)).emit('newNumber', { number: newNumber, calledNumbers: Array.from(game.calledNumbers) });
 
-        }, 5000); // 5000 ms = 5 segundos
-
+        }, 5000); // 5 segundos
     } catch (error) {
         console.error(`Error al iniciar la partida ${gameId}:`, error);
     }
 }
 
-// Función para terminar una partida (cuando hay un ganador o se acaban los números)
 function endGame(gameId, reason) {
     if (!activeGames[gameId]) return;
 
     console.log(`--- TERMINANDO PARTIDA ${gameId}. Razón: ${reason} ---`);
-    clearInterval(activeGames[gameId].intervalId); // Detenemos el intervalo de "cantar" números
+    clearInterval(activeGames[gameId].intervalId);
     
     io.to(String(gameId)).emit('gameEnded', { message: `La partida ha terminado. ${reason}` });
 
-    // Limpiar el estado del juego de la memoria
     delete activeGames[gameId];
 
-    // Actualizar el estado en la base de datos a FINISHED
     pool.query("UPDATE games SET status = 'FINISHED' WHERE id = $1", [gameId])
         .catch(err => console.error(`Error actualizando estado de partida ${gameId} a FINISHED:`, err));
 }
 
-// --- RUTAS DE LA API ---
 
-// Ruta de prueba
+// --- RUTAS DE LA API ---
 app.get('/', (req, res) => res.send('Servidor de Bingo Online funcionando!'));
 
-// Rutas de Autenticación
 app.post('/api/register', async (req, res) => {
     const { username, email, password } = req.body;
     if (!username || !email || !password) return res.status(400).json({ message: 'Todos los campos son obligatorios.' });
@@ -229,27 +219,25 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// Rutas de Partidas
 app.get('/api/games', authenticateToken, async (req, res) => {
     
     try {
         const userId = req.user.id;
-        // Consulta que une games con game_participants para saber si el usuario actual está registrado
         const query = `
             SELECT 
                 g.*,
                 CASE WHEN p.user_id IS NOT NULL AND p.payment_status = 'APPROVED' THEN true ELSE false END AS is_user_registered
             FROM games g
             LEFT JOIN game_participants p ON g.id = p.game_id AND p.user_id = $1
-            WHERE g.scheduled_time >= NOW() - interval '3 hours' -- Muestra partidas incluso si empezaron hace poco
+            WHERE g.scheduled_time >= NOW() - interval '3 hours'
             ORDER BY g.scheduled_time ASC
         `;
-        const games = await pool.query(query, [userId]);
-        res.json(games.rows);
+        const gamesResult = await pool.query(query, [userId]);
+        res.json(gamesResult.rows);
     } 
     catch (error) {
         console.error('Error al obtener partidas:', error);
-        res.status(500).json({ message: 'Error interno al obtener partidas.' });
+        res.status(500).json({ message: 'Error interno.' });
     }
 });
 
@@ -266,7 +254,8 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
 
         if (!game) throw new Error('Partida no encontrada.');
         if (game.status !== 'SCHEDULED') throw new Error('El registro para esta partida no está abierto.');
-        //if (DateTime.now() > DateTime.fromJSDate(game.scheduled_time)) throw new Error('El registro para esta partida ya ha cerrado.');
+        const now = DateTime.now().setZone("America/Argentina/Buenos_Aires"); // Definir 'now' aquí
+        if (now > DateTime.fromJSDate(game.registration_close_at).setZone("America/Argentina/Buenos_Aires")) throw new Error('El registro para esta partida ya ha cerrado.');
         if (game.current_players >= game.max_players) throw new Error('La partida está llena.');
         
         const existingRegistration = await clientDB.query('SELECT * FROM game_participants WHERE game_id = $1 AND user_id = $2', [gameId, userId]);
@@ -277,10 +266,10 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
             payer: { email: userEmail },
             external_reference: JSON.stringify({ gameId, userId }),
             back_urls: {
-                success: `${process.env.RENDER_EXTERNAL_URL}/api/payments/success`,
-                failure: `${process.env.RENDER_EXTERNAL_URL}/api/payments/failure`,
+                success: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/success`,
+                failure: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/failure`
             },
-            notification_url: `${process.env.RENDER_EXTERNAL_URL}/api/payments/webhook`,
+            notification_url: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/webhook`,
         };
 
         const preference = new mercadopago.Preference(mpClient);
@@ -302,13 +291,12 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
         console.log(`Preference ID: ${preferenceId}`);
 
         const userBingoCards = Array.from({ length: 5 }, () => generateBingoCard());
-
         await clientDB.query(
             `INSERT INTO game_participants (game_id, user_id, payment_status, mp_preference_id, card_numbers)
              VALUES ($1, $2, 'PENDING', $3, $4)`,
             [gameId, userId, preferenceId, JSON.stringify(userBingoCards)]
         );
-
+        
         await clientDB.query('COMMIT');
 
         res.status(200).json({
@@ -327,133 +315,83 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
 });
 
 
-// En index.js, la ruta del webhook
-
-// En tu archivo index.js, la ruta del webhook
-
+// Webhook de Mercado Pago (Lógica robusta final)
 app.post('/api/payments/webhook', async (req, res) => {
     const { query, body } = req;
     console.log("Webhook recibido:", { query, body });
 
-    // La notificación principal que nos interesa es la del PAGO
     if (query.type === 'payment' && body.data && body.data.id) {
         const paymentId = body.data.id;
         console.log(`Webhook de PAGO recibido. Procesando ID: ${paymentId}`);
-
+        
         try {
-            // Siempre intentamos obtener los detalles del pago primero
             const paymentController = new mercadopago.Payment(mpClient);
             const payment = await paymentController.get({ id: paymentId });
-            
-            // Si funciona y está aprobado, genial.
+
             if (payment && payment.status === 'approved') {
-                const order = await getOrderFromPayment(payment);
-                await processApprovedPayment(payment, order.external_reference);
+                await processApprovedPayment(payment);
+            } else {
+                console.log(`Pago ${paymentId} no aprobado o no encontrado aún.`);
             }
 
         } catch (error) {
-            // --- WORKAROUND PARA EL ERROR 404 DEL SANDBOX ---
-            if (error.status === 404) {
-                console.warn(`WORKAROUND: Payment ${paymentId} no encontrado (404). Asumiendo pago aprobado y buscando orden...`);
-                
-                // Como el pago da 404, no podemos obtener la orden desde él.
-                // ¡NECESITAMOS LA NOTIFICACIÓN DE 'merchant_order'!
-                // Esta lógica es compleja. Vamos a simplificar. Si recibimos un webhook
-                // de pago, confiamos en la 'merchant_order' que llega casi al mismo tiempo.
-                // Es un hack, pero es lo único que podemos hacer.
-
-                // La notificación de `merchant_order` nos llega por separado.
-                // Tenemos que correlacionarlos. El problema es que esta notificación llega primero.
-                //
-                // CAMBIO DE ESTRATEGIA: La notificación de 'merchant_order' es más fiable.
-                // Vamos a ignorar la de 'payment' y a procesar SOLO la de 'merchant_order'
-                // pero APROBANDO el pago si la orden existe.
-            } else {
-                 console.error('Error procesando webhook de pago:', error);
-            }
+            console.error(`Error al procesar el webhook del pago ${paymentId}:`, error);
         }
-    }
-    
-    // --- LÓGICA FINAL Y ROBUSTA: PROCESAR LA MERCHANT_ORDER ---
-    if (body.topic === 'merchant_order' || query.topic === 'merchant_order') {
+    } else if (body.topic === 'merchant_order' || query.topic === 'merchant_order') {
         const orderId = body.resource?.match(/\d+$/)?.[0] || query.id;
-        if(orderId) {
-             // Procesamos la orden, asumiendo que el pago asociado (aunque no lo veamos) fue aprobado
-             await processOrderAsApproved(orderId);
+        if (orderId) {
+            console.log(`Webhook de ORDEN recibido. Procesando Orden ID: ${orderId}`);
+            // Intenta procesar la orden optimista (asumiendo que el pago ya debería estar aprobado)
+            // Esto es para el caso en que el webhook de 'payment' no llega antes que el de 'merchant_order'
+            processOrderAsApproved(orderId);
+        } else {
+            console.warn("Webhook de orden sin ID de orden.");
         }
+    } else {
+        console.log("Notificación de webhook ignorada (tipo desconocido).");
     }
-
 
     res.status(200).send('Webhook recibido');
 });
 
-// Función para obtener la orden a partir de un pago
-async function getOrderFromPayment(payment) {
-    if (!payment.order?.id) {
-        throw new Error(`El pago ${payment.id} no tiene una orden asociada.`);
-    }
-    const orderController = new mercadopago.MerchantOrder(mpClient);
-    return await orderController.get({ merchantOrderId: payment.order.id });
-}
-
-// Nueva función que asume la aprobación para el Sandbox
-async function processOrderAsApproved(orderId) {
-    try {
-        console.log(`Procesando Orden ${orderId} con aprobación optimista (Sandbox)...`);
-        const orderController = new mercadopago.MerchantOrder(mpClient);
-        const order = await orderController.get({ merchantOrderId: orderId });
-
-        if (order && order.external_reference) {
-            // Creamos un objeto 'payment' simulado para pasarlo a nuestra función de lógica
-            const fakePayment = {
-                id: order.payments?.[0]?.id || `sandbox-${orderId}`, // Usamos el id del pago si existe, si no, uno simulado
-                status: 'approved'
-            };
-            await processApprovedPayment(fakePayment, order.external_reference);
-        }
-    } catch (error) {
-        console.error(`Error procesando la orden ${orderId} de forma optimista:`, error);
-    }
-}
-
-
-// La función processApprovedPayment se queda igual que antes
-// async function processApprovedPayment(payment, externalReference) { ... }
-
-
-// --- ¡NUEVA FUNCIÓN ASÍNCRONA CON REINTENTOS! ---
-async function processMerchantOrder(orderId, retriesLeft) {
-    if (retriesLeft <= 0) {
-        console.error(`No se pudo procesar la orden ${orderId} después de varios intentos.`);
-        return;
-    }
-
+// Función auxiliar para procesar la orden de forma optimista (con reintentos)
+async function processOrderAsApproved(orderId, retries = 3) {
     try {
         const orderController = new mercadopago.MerchantOrder(mpClient);
         const order = await orderController.get({ merchantOrderId: orderId });
 
-        const approvedPayment = order.payments?.find(p => p.status === 'approved');
+        if (order && order.payments) {
+            const approvedPayment = order.payments.find(p => p.status === 'approved');
 
-        if (approvedPayment) {
-            // ¡ÉXITO! Encontramos un pago aprobado.
-            console.log(`Pago aprobado ${approvedPayment.id} encontrado en la orden ${orderId}.`);
-            await processApprovedPayment(approvedPayment, order.external_reference);
+            if (approvedPayment) {
+                console.log(`Orden ${orderId}: Pago aprobado ${approvedPayment.id} encontrado.`);
+                await processApprovedPayment(approvedPayment, order.external_reference);
+            } else if (order.status === 'pending' && retries > 0) {
+                console.log(`Orden ${orderId} aún pendiente. Reintentando en 5s... (intentos restantes: ${retries - 1})`);
+                setTimeout(() => processOrderAsApproved(orderId, retries - 1), 5000);
+            } else {
+                console.warn(`Orden ${orderId} no tiene pagos aprobados y no más reintentos.`);
+            }
         } else {
-            // Si no hay pago aprobado, es el problema de timing.
-            console.log(`La orden ${orderId} aún no tiene pagos aprobados. Reintentando en 5 segundos... (Intentos restantes: ${retriesLeft - 1})`);
-            setTimeout(() => {
-                processMerchantOrder(orderId, retriesLeft - 1);
-            }, 5000); // 5 segundos de espera
+            console.warn(`Orden ${orderId} no encontrada o sin pagos. (Intentos restantes: ${retries - 1})`);
+            if (retries > 0) {
+                setTimeout(() => processOrderAsApproved(orderId, retries - 1), 5000);
+            }
         }
 
     } catch (error) {
-        console.error(`Error al procesar la orden ${orderId}:`, error);
+        console.error(`Error al obtener detalles de la orden ${orderId} en Mercado Pago:`, error);
+        if (retries > 0) {
+            console.log(`Reintentando en 5s... (intentos restantes: ${retries - 1})`);
+            setTimeout(() => processOrderAsApproved(orderId, retries - 1), 5000);
+        } else {
+            console.error(`No se pudo procesar la orden ${orderId} después de varios intentos.`);
+        }
     }
 }
 
 
-// --- TU FUNCIÓN AUXILIAR MODIFICADA ---
-// Ahora recibe el external_reference como parámetro
+// Función auxiliar para actualizar la DB (ahora con externalReference)
 async function processApprovedPayment(payment, externalReference) {
     if (!externalReference) {
         console.error(`El pago ${payment.id} no tiene external_reference en la orden.`);
@@ -468,9 +406,10 @@ async function processApprovedPayment(payment, externalReference) {
         await clientDB.query('BEGIN');
         const updateResult = await clientDB.query(
             `UPDATE game_participants SET payment_status = 'APPROVED', mp_payment_id = $1
-             WHERE game_id = $2 AND user_id = $3 AND payment_status = 'PENDING' RETURNING id`,
+                 WHERE game_id = $2 AND user_id = $3 AND payment_status = 'PENDING' RETURNING id`,
             [payment.id, gameId, userId]
         );
+
         if (updateResult.rowCount > 0) {
             await clientDB.query(
                 'UPDATE games SET current_players = current_players + 1 WHERE id = $1',
@@ -478,7 +417,7 @@ async function processApprovedPayment(payment, externalReference) {
             );
             console.log(`Usuario ${userId} confirmado en partida ${gameId}.`);
         } else {
-            console.log(`El pago ${payment.id} ya fue procesado.`);
+            console.log(`El pago ${payment.id} ya fue procesado o no se encontró participante en PENDING.`);
         }
         await clientDB.query('COMMIT');
     } catch (dbError) {
@@ -489,27 +428,8 @@ async function processApprovedPayment(payment, externalReference) {
     }
 }
 
-io.use((socket, next) => {
-    const token = socket.handshake.auth?.token;
-    if (!token) {
-        return next(new Error("Token no proporcionado"));
-    }
 
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        socket.user = {
-            id: decoded.id,
-            username: decoded.username,
-            email: decoded.email
-        };
-        next();
-    } catch (err) {
-        console.error("Error de autenticación en Socket.IO:", err.message);
-        next(new Error("Token inválido"));
-    }
-});
-
-// --- Lógica de Socket.IO, Tareas Programadas e Inicio del Servidor ---
+// --- Lógica de Socket.IO y Tareas Programadas ---
 io.on('connection', (socket) => {
     // Este código solo se ejecuta si el middleware de autenticación fue exitoso
     console.log(`Usuario autenticado y conectado: ${socket.user.username} (ID: ${socket.id})`);
@@ -524,7 +444,6 @@ io.on('connection', (socket) => {
         socket.emit('gameStatus', { message: `¡Bienvenido al juego ${gameId}!` });
 
         try {
-            // ¡YA NO NECESITAMOS UN FAKE_USER_ID! Usamos el ID del usuario autenticado.
             const userId = socket.user.id; 
             const result = await pool.query(
                 'SELECT card_numbers FROM game_participants WHERE game_id = $1 AND user_id = $2',
@@ -544,8 +463,6 @@ io.on('connection', (socket) => {
         }
     });
 });
-
-
 
 async function setupInitialGames() {
     const today = DateTime.now().setZone("America/Argentina/Buenos_Aires");
@@ -569,7 +486,6 @@ cron.schedule('* * * * *', async () => {
     const now = DateTime.now().setZone("America/Argentina/Buenos_Aires");
 
     try {
-        // Buscamos partidas que estén programadas para empezar en este minuto y aún no han comenzado
         const result = await pool.query(
             "SELECT id, scheduled_time FROM games WHERE status = 'SCHEDULED' AND scheduled_time <= $1",
             [now.toJSDate()]
@@ -584,15 +500,3 @@ cron.schedule('* * * * *', async () => {
 });
 
 server.listen(PORT, () => console.log(`Servidor escuchando en puerto ${PORT}`));
-
-(async () => {
-    try {
-        const result = await pool.query(`
-            ALTER TABLE game_participants
-            ADD COLUMN IF NOT EXISTS mp_payment_id VARCHAR(255);
-        `);
-        console.log("Columna 'mp_payment_id' añadida (si no existía).");
-    } catch (err) {
-        console.error("Error al añadir columna mp_payment_id:", err);
-    }
-})();
