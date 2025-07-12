@@ -16,10 +16,12 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: { 
-        origin: "*", // Permite conexiones desde cualquier origen (para desarrollo). ¡CAMBIAR EN PRODUCCIÓN!
+        origin: "baseUrl", // Permite conexiones desde cualquier origen (para desarrollo). ¡CAMBIAR EN PRODUCCIÓN!
         methods: ["GET", "POST"] 
     }
 });
+const baseUrl = process.env.RAILWAY_PUBLIC_URL || 'http://localhost:3000';
+
 const PORT = process.env.PORT || 3000; // Puerto del servidor, Railway lo asignará a process.env.PORT
 
 // --- CONFIGURACIÓN DE BASE DE DATOS PARA RAILWAY ---
