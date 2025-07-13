@@ -17,7 +17,7 @@ const app = express();
 const server = http.createServer(app); // Crea el servidor HTTP usando Express
 const io = new Server(server, {
     cors: {
-        origin: "*", // Permite conexiones desde cualquier origen (para desarrollo). ¡CAMBIAR EN PRODUCCIÓN!
+        origin:  baseUrl, // Permite conexiones desde cualquier origen (para desarrollo). ¡CAMBIAR EN PRODUCCIÓN!
         methods: ["GET", "POST"]
     }
 });
@@ -25,6 +25,7 @@ const io = new Server(server, {
 
 
 const PORT = process.env.PORT || 3000; // Puerto del servidor, usa el de las variables de entorno o 3000 por defecto
+const baseUrl = process.env.RAILWAY_PUBLIC_URL || 'http://localhost:3000';
 
 // Configuración de la base de datos usando variables de entorno
 const pool = new Pool({
