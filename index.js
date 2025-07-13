@@ -11,12 +11,12 @@ const cron = require('node-cron');
 const mercadopago = require('mercadopago');
 const { DateTime } = require('luxon');
 
-// --- CONFIGURACIÓN PRINCIPAL ---
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] }
 });
+
 const PORT = process.env.PORT || 3000;
 
 // --- CONFIGURACIÓN DE BASE DE DATOS PARA RAILWAY ---
@@ -33,7 +33,7 @@ const mpClient = new mercadopago.MercadoPagoConfig({
     accessToken: process.env.MP_ACCESS_TOKEN,
 });
 
-// --- MIDDLEWARES DE EXPRESS Y SOCKET.IO ---
+// --- MIDDLEWARES ---
 app.use(cors());
 app.use(express.json());
 
@@ -79,7 +79,7 @@ function generateBingoCard() {
     columns['N'] = fillColumn(31, 45, 5);
     columns['G'] = fillColumn(46, 60, 5);
     columns['O'] = fillColumn(61, 75, 5);
-    columns['N'][2] = 0; // Casilla GRATIS
+    columns['N'][2] = 0;
     const card = [];
     for (let row = 0; row < 5; row++) {
         card.push([columns['B'][row], columns['I'][row], columns['N'][row], columns['G'][row], columns['O'][row]]);
@@ -147,7 +147,6 @@ function endGame(gameId, reason) {
 }
 
 // --- RUTAS DE LA API ---
-
 app.get('/', (req, res) => res.send('Servidor de Bingo Online funcionando!'));
 
 app.post('/api/register', async (req, res) => {
@@ -158,10 +157,7 @@ app.post('/api/register', async (req, res) => {
         if (existingUser.rows.length > 0) return res.status(409).json({ message: 'El nombre de usuario o el email ya están registrados.' });
         const salt = await bcrypt.genSalt(10);
         const passwordHash = await bcrypt.hash(password, salt);
-        const result = await pool.query(
-            'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email',
-            [username, email, passwordHash]
-        );
+        const result = await pool.query('INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email', [username, email, passwordHash]);
         res.status(201).json({ message: 'Usuario registrado exitosamente!', user: result.rows[0] });
     } catch (error) {
         console.error('Error en registro:', error);
@@ -275,7 +271,6 @@ app.post('/api/payments/webhook', async (req, res) => {
     res.status(200).send('Webhook recibido');
 });
 
-// Función auxiliar que asume la aprobación y procesa la orden
 async function processOrderAsApproved(orderId) {
     try {
         const orderController = new mercadopago.MerchantOrder(mpClient);
@@ -292,7 +287,6 @@ async function processOrderAsApproved(orderId) {
     }
 }
 
-// Función auxiliar para actualizar la DB
 async function processApprovedPayment(payment, externalReference) {
     if (!externalReference) return;
     const { gameId, userId } = JSON.parse(externalReference);
@@ -306,10 +300,7 @@ async function processApprovedPayment(payment, externalReference) {
             [payment.id, gameId, userId]
         );
         if (updateResult.rowCount > 0) {
-            await clientDB.query(
-                'UPDATE games SET current_players = current_players + 1 WHERE id = $1',
-                [gameId]
-            );
+            await clientDB.query('UPDATE games SET current_players = current_players + 1 WHERE id = $1', [gameId]);
             console.log(`Usuario ${userId} confirmado en partida ${gameId}.`);
         } else {
             console.log(`El pago ${payment.id} ya fue procesado o no se encontró un participante en PENDING.`);
@@ -324,7 +315,7 @@ async function processApprovedPayment(payment, externalReference) {
 }
 
 
-// --- LÓGICA DE SOCKET.IO Y TAREAS PROGRAMADAS ---
+// --- LÓGICA DE SOCKET.IO ---
 io.on('connection', (socket) => {
     console.log(`Usuario autenticado y conectado: ${socket.user.username} (ID: ${socket.id})`);
     socket.on('disconnect', () => console.log(`Usuario desconectado: ${socket.user.username}`));
@@ -352,6 +343,8 @@ io.on('connection', (socket) => {
     });
 });
 
+
+// --- TAREAS PROGRAMADAS Y ARRANQUE ---
 async function setupInitialGames() {
     const today = DateTime.now().setZone("America/Argentina/Buenos_Aires");
     await createDailyGames(today.toJSDate());
@@ -385,8 +378,4 @@ cron.schedule('* * * * *', async () => {
     }
 });
 
-
-// --- INICIO DEL SERVIDOR ---
-server.listen(PORT, () => {
-    console.log(`Servidor de Bingo escuchando en el puerto ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Servidor escuchando en el puerto ${PORT}`));
