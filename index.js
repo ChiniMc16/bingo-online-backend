@@ -15,17 +15,20 @@ const { DateTime } = require('luxon'); // Para manejo avanzado de fechas y zonas
 
 const app = express();
 const server = http.createServer(app); // Crea el servidor HTTP usando Express
+
+const PORT = process.env.PORT || 3000; // Puerto del servidor, usa el de las variables de entorno o 3000 por defecto
+const baseUrl = process.env.RAILWAY_PUBLIC_URL || 'http://localhost:3000';
+
 const io = new Server(server, {
-    cors: {
-        origin:  baseUrl, // Permite conexiones desde cualquier origen (para desarrollo). ¡CAMBIAR EN PRODUCCIÓN!
-        methods: ["GET", "POST"]
-    }
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST']
+  }
 });
 
 
 
-const PORT = process.env.PORT || 3000; // Puerto del servidor, usa el de las variables de entorno o 3000 por defecto
-const baseUrl = process.env.RAILWAY_PUBLIC_URL || 'http://localhost:3000';
+
 
 // Configuración de la base de datos usando variables de entorno
 const pool = new Pool({
@@ -293,22 +296,24 @@ app.get('/api/protected', authenticateToken, (req, res) => {
 
 // Ruta para obtener la lista de partidas disponibles
 app.get('/api/games', authenticateToken, async (req, res) => {
-    try {
-        // Se pueden filtrar por estado, hora, etc. Por ahora, todas las futuras o registrables.
-        const now = DateTime.now().setZone("America/Argentina/Buenos_Aires"); // Usa Luxon para la hora actual
-        const games = await pool.query(
-            `SELECT id, scheduled_time, registration_open_at, registration_close_at,
-                    max_players, current_players, entry_fee, status
-             FROM games
-             WHERE scheduled_time >= $1
-             ORDER BY scheduled_time ASC`,
-            [now.toJSDate()] // Pasa la fecha como objeto Date nativo a la base de datos
-        );
-        res.json(games.rows);
-    } catch (error) {
-        console.error('Error al obtener partidas:', error);
-        res.status(500).json({ message: 'Error interno del servidor al obtener partidas.', details: error.message });
-    }
+  try {
+    const now = DateTime.now().setZone("America/Argentina/Buenos_Aires");
+    const userId = req.user.id;
+    const games = await pool.query(
+      `SELECT games.*, EXISTS (
+        SELECT 1 FROM game_participants gp
+        WHERE gp.user_id = $1 AND gp.game_id = games.id AND gp.payment_status = 'APPROVED'
+      ) AS is_user_registered
+      FROM games
+      WHERE scheduled_time >= $2
+      ORDER BY scheduled_time ASC`,
+      [userId, now.toJSDate()]
+    );
+    res.json(games.rows);
+  } catch (error) {
+    console.error('Error al obtener partidas:', error);
+    res.status(500).json({ message: 'Error interno del servidor al obtener partidas.', details: error.message });
+  }
 });
 
 // Ruta para que un usuario se registre en una partida
@@ -329,28 +334,47 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
         if (now > DateTime.fromJSDate(game.registration_close_at).setZone("America/Argentina/Buenos_Aires")) throw new Error('El registro para esta partida ya ha cerrado.');
         if (game.current_players >= game.max_players) throw new Error('La partida está llena.');
         
-        const existingRegistration = await clientDB.query('SELECT * FROM game_participants WHERE game_id = $1 AND user_id = $2', [gameId, userId]);
-        if (existingRegistration.rows.length > 0) throw new Error('Ya estás registrado en esta partida.');
+        const existingRegistration = await clientDB.query(
+            'SELECT * FROM game_participants WHERE game_id = $1 AND user_id = $2',
+            [gameId, userId]
+        );
 
-         const preferenceBody = {
+        if (existingRegistration.rows.length > 0) {
+            const reg = existingRegistration.rows[0];
+            if (reg.payment_status === 'APPROVED') {
+                 throw new Error('Ya estás registrado en esta partida.');
+            }
+            // Si estaba en 'PENDING', podés dejar continuar y generar otra preferencia
+            console.log(`⚠️ Usuario ${userId} ya tiene una inscripción PENDING para el juego ${gameId}, generando nueva preferencia.`);
+
+            // Opcional: podrías actualizar la preferencia existente si MercadoPago lo permite
+            // o simplemente generar una nueva y reemplazar la antigua en la DB.
+
+            await clientDB.query(
+               `DELETE FROM game_participants WHERE game_id = $1 AND user_id = $2`,
+                [gameId, userId]
+            );
+        }
+
+        const preferenceBody = {
             items: [{
-                title: `Inscripción a Bingo #${gameId}`,
-                unit_price: parseFloat(game.entry_fee),
-                quantity: 1,
-                currency_id: "ARS",
-            }],
+            title: `Inscripción a Bingo #${gameId}`,
+            unit_price: parseFloat(game.entry_fee),
+            quantity: 1,
+            currency_id: "ARS",
+        }],
             payer: {
-                email: userEmail
-            },
+            email: userEmail
+        },
             external_reference: JSON.stringify({ gameId, userId }),
             back_urls: {
-                success: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/success`,
-                failure: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/failure`,
-                pending: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/pending`
-            },
-            auto_return: "approved",
-            notification_url: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/webhook`
-        };
+            success: `${baseUrl}/api/payments/success`,
+            failure: `${baseUrl}/api/payments/failure`,
+            pending: `${baseUrl}/api/payments/pending`
+        },
+  auto_return: "approved",
+  notification_url: `${baseUrl}/api/payments/webhook`
+};
         
         const preference = new mercadopago.Preference(mpClient);
         const mpResponse = await preference.create({ body: preferenceBody });
@@ -397,15 +421,81 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
 
 // Webhook de Mercado Pago
 app.post('/api/payments/webhook', async (req, res) => {
-    console.log("--- INICIO DE WEBHOOK RECIBIDO ---");
-    console.log("==> QUERY PARAMS:", JSON.stringify(req.query, null, 2));
-    console.log("==> BODY:", JSON.stringify(req.body, null, 2));
-    console.log("--- FIN DE WEBHOOK RECIBIDO ---");
-    
-    // Aquí irá la lógica robusta que construyamos a partir de estos logs
-    
-    res.status(200).send('Webhook recibido y logueado.');
+    const { query, body } = req;
+    console.log("Webhook recibido:", { query, body });
+
+    if (body.topic === 'merchant_order' || query.topic === 'merchant_order') {
+        const orderId = body.resource?.match(/\d+$/)?.[0] || query.id;
+        if (orderId) {
+            console.log(`Procesando Orden ${orderId} con aprobación optimista...`);
+            await processOrderAsApproved(orderId);
+        } else {
+            console.warn("Webhook de orden sin ID, ignorando.");
+        }
+    } else {
+        console.log("Notificación de webhook ignorada (no es de tipo 'merchant_order').");
+    }
+
+    res.status(200).send('Webhook recibido');
 });
+
+async function processOrderAsApproved(orderId) {
+    try {
+        const orderController = new mercadopago.MerchantOrder(mpClient);
+        const order = await orderController.get({ merchantOrderId: orderId });
+
+        if (order && order.external_reference) {
+            const fakeApprovedPayment = {
+                id: order.payments?.[0]?.id || `sandbox-pmt-${orderId}`,
+                status: 'approved'
+            };
+            await processApprovedPayment(fakeApprovedPayment, order.external_reference);
+        } else {
+            console.error(`No se pudo encontrar la orden ${orderId} o no tenía external_reference.`);
+        }
+    } catch (error) {
+        console.error(`Error procesando la orden ${orderId} de forma optimista:`, error);
+    }
+}
+
+async function processApprovedPayment(payment, externalReference) {
+    if (!externalReference) {
+        console.error(`El pago ${payment.id} no tiene external_reference en la orden.`);
+        return;
+    }
+
+    const { gameId, userId } = JSON.parse(externalReference);
+    console.log(`Actualizando DB para gameId: ${gameId}, userId: ${userId}`);
+
+    const clientDB = await pool.connect();
+    try {
+        await clientDB.query('BEGIN');
+        const updateResult = await clientDB.query(
+            `UPDATE game_participants 
+             SET payment_status = 'APPROVED', mp_payment_id = $1
+             WHERE game_id = $2 AND user_id = $3 AND payment_status = 'PENDING' 
+             RETURNING id`,
+            [payment.id, gameId, userId]
+        );
+
+        if (updateResult.rowCount > 0) {
+            await clientDB.query(
+                'UPDATE games SET current_players = current_players + 1 WHERE id = $1',
+                [gameId]
+            );
+            console.log(`✅ Usuario ${userId} confirmado en partida ${gameId}.`);
+        } else {
+            console.log(`ℹ️ El pago ${payment.id} ya fue procesado o no estaba en estado 'PENDING'.`);
+        }
+
+        await clientDB.query('COMMIT');
+    } catch (dbError) {
+        await clientDB.query('ROLLBACK');
+        console.error('Error de DB en webhook:', dbError);
+    } finally {
+        clientDB.release();
+    }
+}
 
 
 // --- Lógica de Socket.IO y Tareas Programadas ---
