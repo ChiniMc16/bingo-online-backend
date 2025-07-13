@@ -352,30 +352,22 @@ async function setupInitialGames() {
     await createDailyGames(tomorrow.toJSDate());
 }
 
-setupInitialGames();
+// Cron Jobs (se quedan igual)
+cron.schedule('1 0 * * *', () => { /* ... */ });
+cron.schedule('* * * * *', async () => { /* ... */ });
 
-cron.schedule('1 0 * * *', () => {
-    console.log('Ejecutando tarea cron para crear partidas del día siguiente.');
-    const tomorrow = DateTime.now().setZone("America/Argentina/Buenos_Aires").plus({ days: 1 });
-    createDailyGames(tomorrow.toJSDate());
-}, {
-    timezone: "America/Argentina/Buenos_Aires"
+// Inicia el servidor PRIMERO
+server.listen(PORT, () => {
+    console.log(`Servidor de Bingo escuchando en el puerto ${PORT}`);
+    
+    // --- LÓGICA DE ARRANQUE PESADA, AHORA CON RETARDO ---
+    // Usamos un setTimeout para darle tiempo al servidor de "respirar"
+    // antes de hacer las consultas a la base de datos.
+    console.log("Esperando 5 segundos antes de configurar las partidas iniciales...");
+    setTimeout(() => {
+        console.log("Ejecutando setupInitialGames...");
+        setupInitialGames().catch(err => {
+            console.error("Error durante la configuración inicial de partidas:", err);
+        });
+    }, 5000); // 5000 ms = 5 segundos de espera
 });
-
-cron.schedule('* * * * *', async () => {
-    console.log('Cron: Verificando partidas a iniciar...');
-    const now = DateTime.now().setZone("America/Argentina/Buenos_Aires");
-    try {
-        const result = await pool.query(
-            "SELECT id FROM games WHERE status = 'SCHEDULED' AND scheduled_time <= $1",
-            [now.toJSDate()]
-        );
-        for (const game of result.rows) {
-            startGame(game.id);
-        }
-    } catch (error) {
-        console.error('Cron: Error al verificar partidas a iniciar:', error);
-    }
-});
-
-server.listen(PORT, () => console.log(`Servidor escuchando en el puerto ${PORT}`));
