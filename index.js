@@ -263,17 +263,28 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
         const existingRegistration = await clientDB.query('SELECT * FROM game_participants WHERE game_id = $1 AND user_id = $2', [gameId, userId]);
         if (existingRegistration.rows.length > 0) throw new Error('Ya estás registrado en esta partida.');
 
-        const preferenceBody = {
-            items: [{ title: `Inscripción a Bingo #${gameId}`, unit_price: parseFloat(game.entry_fee), quantity: 1, currency_id: "ARS" }],
-            payer: { email: userEmail },
+         const preferenceBody = {
+            items: [{
+                title: `Inscripción a Bingo #${gameId}`,
+                unit_price: parseFloat(game.entry_fee),
+                quantity: 1,
+                currency_id: "ARS",
+                // description y category_id son opcionales, los podemos quitar si no se usan
+            }],
+            payer: {
+                email: userEmail
+            },
             external_reference: JSON.stringify({ gameId, userId }),
             back_urls: {
+                // Sin punto y coma al final
                 success: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/success`,
-                failure: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/failure`
+                failure: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/failure`,
+                pending: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/pending` // Opcional pero recomendado
             },
-            notification_url: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/webhook`,
+            auto_return: "approved",
+            notification_url: `${process.env.RAILWAY_PUBLIC_URL}/api/payments/webhook` // Sin punto y coma
         };
-
+        
         const preference = new mercadopago.Preference(mpClient);
         const mpResponse = await preference.create({ body: preferenceBody });
 
