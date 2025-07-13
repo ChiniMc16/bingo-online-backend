@@ -469,6 +469,7 @@ async function processApprovedPayment(payment, externalReference) {
 
     const clientDB = await pool.connect();
     try {
+        console.log('🎯 Ejecutando processApprovedPayment con:', { payment, externalReference });
         await clientDB.query('BEGIN');
         const updateResult = await clientDB.query(
             `UPDATE game_participants 
@@ -497,6 +498,17 @@ async function processApprovedPayment(payment, externalReference) {
     }
 }
 
+
+io.use((socket, next) => {
+    const token = socket.handshake.headers['authorization']?.split(' ')[1];
+    if (!token) return next(new Error("Falta token"));
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+        if (err) return next(new Error("Token inválido"));
+        socket.user = decoded; // Almacena el usuario en socket.user
+        next();
+    });
+});
 
 // --- Lógica de Socket.IO y Tareas Programadas ---
 io.on('connection', (socket) => {
