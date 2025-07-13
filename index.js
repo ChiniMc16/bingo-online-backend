@@ -376,7 +376,7 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
   notification_url: `${baseUrl}/api/payments/webhook`
 };
         
-        const preference = new mercadopago.Preference(mpClient);
+        const preference = new mercadopago.Preference(client);
         const mpResponse = await preference.create({ body: preferenceBody });
 
         console.log("<-- Respuesta de Mercado Pago:", JSON.stringify(mpResponse, null, 2));
@@ -441,7 +441,7 @@ app.post('/api/payments/webhook', async (req, res) => {
 
 async function processOrderAsApproved(orderId) {
     try {
-        const orderController = new mercadopago.MerchantOrder(mpClient);
+        const orderController = new mercadopago.MerchantOrder(client);
         const order = await orderController.get({ merchantOrderId: orderId });
 
         if (order && order.external_reference) {
