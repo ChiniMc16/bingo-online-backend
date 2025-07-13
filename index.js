@@ -319,23 +319,13 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
 
 // Webhook de Mercado Pago (Lógica robusta final)
 app.post('/api/payments/webhook', async (req, res) => {
-    const { query, body } = req;
-    console.log("Webhook recibido:", { query, body });
-
-    // La notificación más fiable en Sandbox es la de la ORDEN.
-    if (body.topic === 'merchant_order' || query.topic === 'merchant_order') {
-        const orderId = body.resource?.match(/\d+$/)?.[0] || query.id;
-        if(orderId) {
-             console.log(`Procesando Orden ${orderId} con aprobación optimista...`);
-             await processOrderAsApproved(orderId);
-        } else {
-            console.warn("Webhook de orden sin ID, ignorando.");
-        }
-    } else {
-        console.log("Notificación de webhook ignorada (no es de tipo 'merchant_order').");
-    }
+    console.log("--- INICIO DE WEBHOOK RECIBIDO ---");
+    console.log("==> QUERY PARAMS:", JSON.stringify(req.query, null, 2));
+    console.log("==> BODY:", JSON.stringify(req.body, null, 2));
+    console.log("--- FIN DE WEBHOOK RECIBIDO ---");
     
-    res.status(200).send('Webhook recibido');
+    // Respondemos OK inmediatamente para que Mercado Pago no reintente.
+    res.status(200).send('Webhook recibido y logueado.');
 });
 
 // Función auxiliar que ASUME la aprobación y procesa la orden
