@@ -520,24 +520,31 @@ io.on('connection', (socket) => {
     });
 
     socket.on('joinGame', async (gameId) => {
-        socket.join(String(gameId));
-        console.log(`Usuario ${socket.user.username} se unió al juego ${gameId}`);
-        socket.emit('gameStatus', { message: `¡Bienvenido al juego ${gameId}!` });
+    socket.join(String(gameId));
+    console.log(`Usuario ${socket.user.username} se unió al juego ${gameId}`);
+    socket.emit('gameStatus', { message: `¡Bienvenido al juego ${gameId}!` });
 
-        try {
-            const userId = socket.user.id; 
-            const result = await pool.query(
-                'SELECT card_numbers FROM game_participants WHERE game_id = $1 AND user_id = $2',
-                [gameId, userId]
-            );
+    try {
+        const userId = socket.user.id; 
+        const result = await pool.query(
+            'SELECT card_numbers FROM game_participants WHERE game_id = $1 AND user_id = $2 AND payment_status = \'APPROVED\'',
+            [gameId, userId]
+        );
 
-            if (result.rows.length > 0) {
-                const userCards = result.rows[0].card_numbers;
-                socket.emit('yourCards', { cards: userCards });
-                console.log(`Cartones enviados al usuario ${socket.user.username} para la partida ${gameId}`);
-            } else {
-                socket.emit('gameError', { message: 'No se encontraron tus cartones para esta partida.' });
-            }
+        if (result.rows.length > 0) {
+            const cardsJsonString = result.rows[0].card_numbers; // Sigue siendo un string
+
+            // --- ¡AQUÍ ESTÁ LA CORRECCIÓN CLAVE! ---
+            // Parseamos el string a un objeto/array de JavaScript ANTES de enviarlo.
+            const parsedCards = JSON.parse(cardsJsonString);
+
+            // Ahora enviamos el objeto parseado.
+            socket.emit('yourCards', { cards: parsedCards }); 
+            
+            console.log(`Cartones enviados al usuario ${socket.user.username} para la partida ${gameId}`);
+        } else {
+            socket.emit('gameError', { message: 'No se encontraron tus cartones para esta partida (pago no confirmado).' });
+        }
         } catch (error) {
             console.error('Error al obtener los cartones del usuario:', error);
             socket.emit('gameError', { message: 'Error al obtener tus cartones.' });
