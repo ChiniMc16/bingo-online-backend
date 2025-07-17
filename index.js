@@ -569,6 +569,11 @@ cron.schedule('1 0 * * *', () => {
     timezone: "America/Argentina/Buenos_Aires"
 });
 
+async function startGame(gameId) {
+    console.log(`🔔 Iniciando partida con ID ${gameId}...`);
+    // Aquí irá la lógica de sorteo, envío de números por socket, validación de bingo, etc.
+}
+
 cron.schedule('* * * * *', async () => {
     console.log('Cron: Verificando partidas a iniciar...');
     const now = DateTime.now().setZone("America/Argentina/Buenos_Aires");
