@@ -561,6 +561,11 @@ async function setupInitialGames() {
 
 setupInitialGames();
 
+async function startGame(gameId) {
+    console.log(`✅ Lógica de inicio del juego ${gameId} (aquí irá el sorteo de números, etc.)`);
+    // TODO: Agregá lógica real más adelante
+}
+
 cron.schedule('1 0 * * *', () => {
     console.log('Ejecutando tarea cron para crear partidas del día siguiente.');
     const tomorrow = DateTime.now().setZone("America/Argentina/Buenos_Aires").plus({ days: 1 });
@@ -569,10 +574,7 @@ cron.schedule('1 0 * * *', () => {
     timezone: "America/Argentina/Buenos_Aires"
 });
 
-async function startGame(gameId) {
-    console.log(`✅ Lógica de inicio del juego ${gameId} (aquí irá el sorteo de números, etc.)`);
-    // TODO: Agregá lógica real más adelante
-}
+
 
 cron.schedule('* * * * *', async () => {
     console.log('Cron: Verificando partidas a iniciar...');
