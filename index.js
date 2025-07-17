@@ -570,8 +570,8 @@ cron.schedule('1 0 * * *', () => {
 });
 
 async function startGame(gameId) {
-    console.log(`🔔 Iniciando partida con ID ${gameId}...`);
-    // Aquí irá la lógica de sorteo, envío de números por socket, validación de bingo, etc.
+    console.log(`✅ Lógica de inicio del juego ${gameId} (aquí irá el sorteo de números, etc.)`);
+    // TODO: Agregá lógica real más adelante
 }
 
 cron.schedule('* * * * *', async () => {
