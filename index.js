@@ -564,48 +564,63 @@ async function setupInitialGames() {
 setupInitialGames();
 
 async function startGame(gameId) {
-    console.log(`🎲 Iniciando sorteo de Bingo para partida ${gameId}...`);
-
-    const availableNumbers = Array.from({ length: 75 }, (_, i) => i + 1);
-    const drawnNumbers = [];
-
-    // 1. Cambiar estado a IN_PROGRESS
-    try {
-        await pool.query(
-            `UPDATE games SET status = 'IN_PROGRESS', drawn_numbers = '[]' WHERE id = $1`,
-            [gameId]
-        );
-    } catch (error) {
-        console.error(`❌ Error actualizando estado del juego ${gameId}:`, error);
+    // Evitar iniciar una partida que ya está en curso
+    if (activeGames[gameId]) {
+        console.log(`Intento de iniciar la partida ${gameId}, que ya está en curso.`);
         return;
     }
 
-    const interval = setInterval(async () => {
-        if (availableNumbers.length === 0) {
-            clearInterval(interval);
-            console.log(`🏁 Fin del sorteo para la partida ${gameId}`);
-            return;
-        }
+    console.log(`--- INICIANDO PARTIDA ${gameId} ---`);
 
-        // 2. Elegir un número aleatorio
-        const randomIndex = Math.floor(Math.random() * availableNumbers.length);
-        const number = availableNumbers.splice(randomIndex, 1)[0];
-        drawnNumbers.push(number);
+    try {
+        // 1. Actualizar el estado de la partida en la base de datos a IN_PROGRESS
+        await pool.query("UPDATE games SET status = 'IN_PROGRESS' WHERE id = $1", [gameId]);
 
-        // 3. Actualizar DB con números sorteados
-        try {
-            await pool.query(
-                `UPDATE games SET drawn_numbers = $1 WHERE id = $2`,
-                [JSON.stringify(drawnNumbers), gameId]
-            );
-        } catch (err) {
-            console.error(`❌ Error guardando número sorteado en DB (juego ${gameId}):`, err);
-        }
+        // 2. Preparar el juego
+        const numbersToCall = Array.from({ length: 75 }, (_, i) => i + 1); // Array del 1 al 75
+        const calledNumbers = new Set();
 
-        // 4. Enviar número a los jugadores vía Socket.IO
-        io.to(String(gameId)).emit('newNumber', { number });
-        console.log(`🎉 Número sorteado para juego ${gameId}: ${number}`);
-    }, 4000); // Cada 4 segundos
+        // 3. Guardar el estado del juego en memoria
+        activeGames[gameId] = {
+            intervalId: null,
+            numbersToCall: numbersToCall,
+            calledNumbers: calledNumbers,
+        };
+        
+        // Notificamos a todos en la sala que el juego ha comenzado
+        io.to(String(gameId)).emit('gameStarted', { message: `¡La partida #${gameId} ha comenzado!` });
+
+        // 4. Empezar a "cantar" números cada 5 segundos
+        activeGames[gameId].intervalId = setInterval(() => {
+            const game = activeGames[gameId];
+            if (!game || game.numbersToCall.length === 0) {
+                return endGame(gameId, "Se han cantado todos los números.");
+            }
+
+            const randomIndex = Math.floor(Math.random() * game.numbersToCall.length);
+            const newNumber = game.numbersToCall.splice(randomIndex, 1)[0];
+            game.calledNumbers.add(newNumber);
+
+            console.log(`Partida ${gameId}: Cantando número ${newNumber}`);
+            
+            // Emitir el nuevo número a todos los jugadores en la sala
+            io.to(String(gameId)).emit('newNumber', { number: newNumber });
+
+        }, 5000); // Cada 5 segundos
+
+    } catch (error) {
+        console.error(`Error al iniciar la partida ${gameId}:`, error);
+    }
+}
+
+// También asegúrate de tener la función endGame
+function endGame(gameId, reason) {
+    if (!activeGames[gameId]) return;
+    console.log(`--- TERMINANDO PARTIDA ${gameId}. Razón: ${reason} ---`);
+    clearInterval(activeGames[gameId].intervalId);
+    io.to(String(gameId)).emit('gameEnded', { message: `La partida ha terminado. ${reason}` });
+    delete activeGames[gameId];
+    pool.query("UPDATE games SET status = 'FINISHED' WHERE id = $1", [gameId]);
 }
 
 
