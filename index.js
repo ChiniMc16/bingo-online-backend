@@ -540,7 +540,7 @@ io.on('connection', (socket) => {
 
             // Ahora enviamos el objeto parseado.
             socket.emit("yourCards", {
-            cards: JSON.stringify(userCards) // Esto debe ser un string válido de arrays
+            cards: JSON.stringify(parsedCards)  // ✅ Esto sí contiene los cartones correctos
             });
             
             console.log(`Cartones enviados al usuario ${socket.user.username} para la partida ${gameId}`);
