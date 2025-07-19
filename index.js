@@ -296,24 +296,37 @@ app.get('/api/protected', authenticateToken, (req, res) => {
 
 // Ruta para obtener la lista de partidas disponibles
 app.get('/api/games', authenticateToken, async (req, res) => {
-  try {
-    const now = DateTime.now().setZone("America/Argentina/Buenos_Aires");
-    const userId = req.user.id;
-    const games = await pool.query(
-      `SELECT games.*, EXISTS (
-        SELECT 1 FROM game_participants gp
-        WHERE gp.user_id = $1 AND gp.game_id = games.id AND gp.payment_status = 'APPROVED'
-      ) AS is_user_registered
-      FROM games
-      WHERE scheduled_time >= $2
-      ORDER BY scheduled_time ASC`,
-      [userId, now.toJSDate()]
-    );
-    res.json(games.rows);
-  } catch (error) {
-    console.error('Error al obtener partidas:', error);
-    res.status(500).json({ message: 'Error interno del servidor al obtener partidas.', details: error.message });
-  }
+    try {
+        const userId = req.user.id;
+
+        // --- NUEVA CONSULTA SQL MEJORADA ---
+        const query = `
+            SELECT 
+                g.*,
+                CASE 
+                    WHEN p.user_id IS NOT NULL AND p.payment_status = 'APPROVED' 
+                    THEN true 
+                    ELSE false 
+                END AS is_user_registered
+            FROM games g
+            LEFT JOIN game_participants p ON g.id = p.game_id AND p.user_id = $1
+            WHERE 
+                -- Condición 1: Muestra la partida si el usuario está registrado (sin importar el estado o la hora)
+                (p.user_id = $1 AND p.payment_status = 'APPROVED')
+                OR 
+                -- Condición 2: O si la partida está programada y aún no ha terminado (para nuevos registros)
+                (g.status = 'SCHEDULED') 
+            ORDER BY 
+                g.scheduled_time ASC
+        `;
+        
+        const gamesResult = await pool.query(query, [userId]);
+        res.json(gamesResult.rows);
+
+    } catch (error) {
+        console.error('Error al obtener partidas:', error);
+        res.status(500).json({ message: 'Error interno.' });
+    }
 });
 
 // Ruta para que un usuario se registre en una partida
