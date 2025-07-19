@@ -513,12 +513,18 @@ async function processApprovedPayment(payment, externalReference) {
 
 
 io.use((socket, next) => {
-    const token = socket.handshake.headers['authorization']?.split(' ')[1];
-    if (!token) return next(new Error("Falta token"));
-
+    // Busca el token en el lugar correcto: handshake.auth
+    const token = socket.handshake.auth?.token; 
+    if (!token) {
+        console.error("Socket Auth Error: No se encontró token en handshake.auth");
+        return next(new Error("Falta token"));
+    }
     jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-        if (err) return next(new Error("Token inválido"));
-        socket.user = decoded; // Almacena el usuario en socket.user
+        if (err) {
+            console.error("Socket Auth Error: Token inválido.", err.message);
+            return next(new Error("Token inválido"));
+        }
+        socket.user = decoded;
         next();
     });
 });
