@@ -576,6 +576,8 @@ async function setupInitialGames() {
 
 setupInitialGames();
 
+const activeGames = {};
+
 async function startGame(gameId) {
     // Evitar iniciar una partida que ya está en curso
     if (activeGames[gameId]) {
