@@ -539,7 +539,9 @@ io.on('connection', (socket) => {
             const parsedCards = JSON.parse(cardsJsonString);
 
             // Ahora enviamos el objeto parseado.
-            socket.emit('yourCards', { cards: parsedCards }); 
+            socket.emit("yourCards", {
+            cards: JSON.stringify(userCards) // Esto debe ser un string válido de arrays
+            });
             
             console.log(`Cartones enviados al usuario ${socket.user.username} para la partida ${gameId}`);
         } else {
@@ -562,9 +564,51 @@ async function setupInitialGames() {
 setupInitialGames();
 
 async function startGame(gameId) {
-    console.log(`✅ Lógica de inicio del juego ${gameId} (aquí irá el sorteo de números, etc.)`);
-    // TODO: Agregá lógica real más adelante
+    console.log(`🎲 Iniciando sorteo de Bingo para partida ${gameId}...`);
+
+    const availableNumbers = Array.from({ length: 75 }, (_, i) => i + 1);
+    const drawnNumbers = [];
+
+    // 1. Cambiar estado a IN_PROGRESS
+    try {
+        await pool.query(
+            `UPDATE games SET status = 'IN_PROGRESS', drawn_numbers = '[]' WHERE id = $1`,
+            [gameId]
+        );
+    } catch (error) {
+        console.error(`❌ Error actualizando estado del juego ${gameId}:`, error);
+        return;
+    }
+
+    const interval = setInterval(async () => {
+        if (availableNumbers.length === 0) {
+            clearInterval(interval);
+            console.log(`🏁 Fin del sorteo para la partida ${gameId}`);
+            return;
+        }
+
+        // 2. Elegir un número aleatorio
+        const randomIndex = Math.floor(Math.random() * availableNumbers.length);
+        const number = availableNumbers.splice(randomIndex, 1)[0];
+        drawnNumbers.push(number);
+
+        // 3. Actualizar DB con números sorteados
+        try {
+            await pool.query(
+                `UPDATE games SET drawn_numbers = $1 WHERE id = $2`,
+                [JSON.stringify(drawnNumbers), gameId]
+            );
+        } catch (err) {
+            console.error(`❌ Error guardando número sorteado en DB (juego ${gameId}):`, err);
+        }
+
+        // 4. Enviar número a los jugadores vía Socket.IO
+        io.to(String(gameId)).emit('newNumber', { number });
+        console.log(`🎉 Número sorteado para juego ${gameId}: ${number}`);
+    }, 4000); // Cada 4 segundos
 }
+
+
 
 cron.schedule('1 0 * * *', () => {
     console.log('Ejecutando tarea cron para crear partidas del día siguiente.');
