@@ -333,36 +333,23 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
 
     try {
         await clientDB.query('BEGIN');
-
         const gameResult = await clientDB.query('SELECT * FROM games WHERE id = $1 FOR UPDATE', [gameId]);
         const game = gameResult.rows[0];
 
+        // Validaciones
         if (!game) throw new Error('Partida no encontrada.');
         if (game.status !== 'SCHEDULED') throw new Error('El registro para esta partida no está abierto.');
         const now = DateTime.now().setZone("America/Argentina/Buenos_Aires");
-        if (now > DateTime.fromJSDate(game.registration_close_at).setZone("America/Argentina/Buenos_Aires")) throw new Error('El registro para esta partida ya ha cerrado.');
+        if (now > DateTime.fromJSDate(game.registration_close_at)) throw new Error('El registro para esta partida ya ha cerrado.');
         if (game.current_players >= game.max_players) throw new Error('La partida está llena.');
         
-        const existingRegistration = await clientDB.query(
-            'SELECT * FROM game_participants WHERE game_id = $1 AND user_id = $2',
-            [gameId, userId]
-        );
-
+        const existingRegistration = await clientDB.query('SELECT * FROM game_participants WHERE game_id = $1 AND user_id = $2', [gameId, userId]);
         if (existingRegistration.rows.length > 0) {
-            const reg = existingRegistration.rows[0];
-            if (reg.payment_status === 'APPROVED') {
-                 throw new Error('Ya estás registrado en esta partida.');
+            if (existingRegistration.rows[0].payment_status === 'APPROVED') {
+                throw new Error('Ya estás registrado en esta partida.');
             }
-            // Si estaba en 'PENDING', podés dejar continuar y generar otra preferencia
-            console.log(`⚠️ Usuario ${userId} ya tiene una inscripción PENDING para el juego ${gameId}, generando nueva preferencia.`);
-
-            // Opcional: podrías actualizar la preferencia existente si MercadoPago lo permite
-            // o simplemente generar una nueva y reemplazar la antigua en la DB.
-
-            await clientDB.query(
-               `DELETE FROM game_participants WHERE game_id = $1 AND user_id = $2`,
-                [gameId, userId]
-            );
+            console.log(`⚠️ Usuario ${userId} tenía inscripción PENDING, borrando para generar nueva preferencia.`);
+            await clientDB.query(`DELETE FROM game_participants WHERE game_id = $1 AND user_id = $2`, [gameId, userId]);
         }
 
         const preferenceBody = {
@@ -464,7 +451,6 @@ async function processApprovedPayment(payment, externalReference) {
 
     const clientDB = await pool.connect();
     try {
-        console.log('🎯 Ejecutando processApprovedPayment con:', { payment, externalReference });
         await clientDB.query('BEGIN');
         const updateResult = await clientDB.query(
             `UPDATE game_participants 
