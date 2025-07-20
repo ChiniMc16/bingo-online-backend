@@ -367,43 +367,34 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
 
         const preferenceBody = {
             items: [{
-            title: `Inscripción a Bingo #${gameId}`,
-            unit_price: parseFloat(game.entry_fee),
-            quantity: 1,
-            currency_id: "ARS",
-        }],
+                title: `Inscripción a Bingo #${gameId}`,
+                unit_price: parseFloat(game.entry_fee),
+                quantity: 1,
+                currency_id: "ARS",
+            }],
             payer: {
-            email: userEmail
-        },
+                email: userEmail
+            },
             external_reference: JSON.stringify({ gameId, userId }),
             back_urls: {
-            success: `${baseUrl}/api/payments/success`,
-            failure: `${baseUrl}/api/payments/failure`,
-            pending: `${baseUrl}/api/payments/pending`
-        },
-  auto_return: "approved",
-  notification_url: `${baseUrl}/api/payments/webhook`
-};
+                success: `${baseUrl}/api/payments/success`,
+                failure: `${baseUrl}/api/payments/failure`,
+                pending: `${baseUrl}/api/payments/pending`
+            },
+            auto_return: "approved",
+            notification_url: `${baseUrl}/api/payments/webhook`
+        };
         
         const preference = new mercadopago.Preference(mpClient);
         const mpResponse = await preference.create({ body: preferenceBody });
-
-        console.log("<-- Respuesta de Mercado Pago:", JSON.stringify(mpResponse, null, 2));
-
+        
         const initPoint = mpResponse.sandbox_init_point || mpResponse.init_point;
-
-        if (!initPoint) {
-            throw new Error("Mercado Pago no devolvió una URL de pago válida.");
-        }
+        if (!initPoint) throw new Error("Mercado Pago no devolvió una URL de pago válida.");
 
         const preferenceId = mpResponse.id;
         const deepLinkUrl = initPoint.replace('https://', 'mercadopago://');
-
-        console.log(`URL de pago generada: ${initPoint}`);
-        console.log(`Deep Link generado: ${deepLinkUrl}`);
-        console.log(`Preference ID: ${preferenceId}`);
-
         const userBingoCards = Array.from({ length: 5 }, () => generateBingoCard());
+        
         await clientDB.query(
             `INSERT INTO game_participants (game_id, user_id, payment_status, mp_preference_id, card_numbers)
              VALUES ($1, $2, 'PENDING', $3, $4)`,
@@ -411,12 +402,7 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
         );
         
         await clientDB.query('COMMIT');
-
-        res.status(200).json({
-            message: 'Preferencia creada.',
-            checkoutUrl: initPoint,
-            deepLinkUrl: deepLinkUrl
-        });
+        res.status(200).json({ message: 'Preferencia creada.', checkoutUrl: initPoint, deepLinkUrl: deepLinkUrl });
 
     } catch (error) {
         await clientDB.query('ROLLBACK');
