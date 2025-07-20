@@ -571,6 +571,65 @@ io.on('connection', (socket) => {
             socket.emit('gameError', { message: 'Error al obtener tus cartones.' });
         }
     });
+
+    // Dentro de io.on('connection', ...)
+
+    socket.on('bingo', async (data) => {
+        const { gameId, cardIndex } = data; // Esperamos el ID de la partida y el índice del cartón ganador
+        const userId = socket.user.id;
+        const username = socket.user.username;
+
+        console.log(`📢 ¡BINGO cantado por ${username} en la partida ${gameId} con el cartón índice ${cardIndex}!`);
+
+        // Verificamos que el juego esté realmente en progreso
+        if (!activeGames[gameId]) {
+            return socket.emit('bingoResult', { valid: false, message: 'La partida no está en curso.' });
+        }
+
+        try {
+            // 1. Obtener los cartones del jugador y los números cantados
+            const participantResult = await pool.query(
+                'SELECT card_numbers FROM game_participants WHERE game_id = $1 AND user_id = $2',
+                [gameId, userId]
+            );
+
+            if (participantResult.rows.length === 0) {
+                return socket.emit('bingoResult', { valid: false, message: 'No estás participando en esta partida.' });
+            }
+
+            const userCards = participantResult.rows[0].card_numbers;
+            const winningCard = userCards[cardIndex]; // El cartón específico que el jugador dice que ganó
+            const calledNumbers = activeGames[gameId].calledNumbers;
+
+            // 2. Función para verificar si el cartón es ganador
+            let isWinner = true;
+            for (const row of winningCard) {
+                for (const number of row) {
+                    if (number !== 0 && !calledNumbers.has(number)) {
+                        isWinner = false; // Si un número del cartón no ha sido cantado, no es ganador
+                        break;
+                    }
+                }
+                if (!isWinner) break;
+            }
+            
+            // 3. Responder y finalizar el juego
+            if (isWinner) {
+                socket.emit('bingoResult', { valid: true, message: '¡Felicidades, has ganado!' });
+                endGame(gameId, `¡BINGO cantado por ${username}!`, {
+                    userId,
+                    username,
+                    winningCard
+                });
+            } else {
+                socket.emit('bingoResult', { valid: false, message: '¡Bingo incorrecto! Sigues en juego.' });
+            }
+
+        } catch (error) {
+            console.error('Error al verificar BINGO:', error);
+            socket.emit('bingoResult', { valid: false, message: 'Error del servidor al verificar tu cartón.' });
+        }
+    });
 });
 
 async function setupInitialGames() {
@@ -635,15 +694,45 @@ async function startGame(gameId) {
 }
 
 // También asegúrate de tener la función endGame
-function endGame(gameId, reason) {
+async function endGame(gameId, reason, winnerInfo = null) {
     if (!activeGames[gameId]) return;
+
     console.log(`--- TERMINANDO PARTIDA ${gameId}. Razón: ${reason} ---`);
     clearInterval(activeGames[gameId].intervalId);
-    io.to(String(gameId)).emit('gameEnded', { message: `La partida ha terminado. ${reason}` });
-    delete activeGames[gameId];
-    pool.query("UPDATE games SET status = 'FINISHED' WHERE id = $1", [gameId]);
-}
+    
+    // Notificamos a todos en la sala sobre el final y el ganador (si hay)
+    io.to(String(gameId)).emit('gameEnded', { 
+        message: `La partida ha terminado. ${reason}`,
+        winner: winnerInfo?.username 
+    });
 
+    const finalDrawnNumbers = JSON.stringify(Array.from(activeGames[gameId].calledNumbers));
+    
+    // Limpiar el estado del juego de la memoria
+    delete activeGames[gameId];
+
+    // Actualizar la base de datos con los resultados
+    try {
+        if (winnerInfo) {
+            await pool.query(
+                `UPDATE games 
+                 SET status = 'FINISHED', winner_user_id = $1, winning_card = $2, drawn_numbers = $3 
+                 WHERE id = $4`,
+                [winnerInfo.userId, JSON.stringify(winnerInfo.winningCard), finalDrawnNumbers, gameId]
+            );
+            console.log(`Partida ${gameId} finalizada. Ganador: ${winnerInfo.username}`);
+        } else {
+            // Si no hay ganador (ej. se acabaron los números)
+            await pool.query(
+                "UPDATE games SET status = 'FINISHED', drawn_numbers = $1 WHERE id = $2",
+                [finalDrawnNumbers, gameId]
+            );
+            console.log(`Partida ${gameId} finalizada sin ganador.`);
+        }
+    } catch (err) {
+        console.error(`Error actualizando estado de partida ${gameId} a FINISHED:`, err);
+    }
+}
 
 
 cron.schedule('1 0 * * *', () => {
@@ -671,6 +760,55 @@ cron.schedule('* * * * *', async () => {
         }
     } catch (error) {
         console.error('Cron: Error al verificar partidas a iniciar:', error);
+    }
+});
+
+// Tarea para limpiar partidas viejas
+cron.schedule('5 3 * * *', async () => { // Todos los días a las 3:05 AM
+    console.log('Cron: Limpiando partidas antiguas...');
+    try {
+        // Borra participantes y luego partidas que terminaron hace más de 24 horas
+        const cutoffDate = DateTime.now().minus({ hours: 24 }).toJSDate();
+        
+        // Primero borramos los participantes para evitar violaciones de clave foránea
+        await pool.query(
+            `DELETE FROM game_participants 
+             WHERE game_id IN (SELECT id FROM games WHERE status = 'FINISHED' AND updated_at < $1)`,
+            [cutoffDate]
+        );
+        
+        // Luego borramos las partidas
+        const result = await pool.query(
+            "DELETE FROM games WHERE status = 'FINISHED' AND updated_at < $1",
+            [cutoffDate]
+        );
+        console.log(`Cron: ${result.rowCount} partidas antiguas han sido borradas.`);
+    } catch (error) {
+        console.error('Cron: Error al limpiar partidas antiguas:', error);
+    }
+}, {
+    timezone: "America/Argentina/Buenos_Aires"
+});
+
+// Ruta para obtener el historial de partidas finalizadas
+app.get('/api/games/history', authenticateToken, async (req, res) => {
+    try {
+        // Obtenemos las últimas X partidas finalizadas, junto con el nombre del ganador
+        const query = `
+            SELECT 
+                g.id, g.scheduled_time, g.winning_card, g.drawn_numbers,
+                u.username AS winner_username
+            FROM games g
+            LEFT JOIN users u ON g.winner_user_id = u.id
+            WHERE g.status = 'FINISHED'
+            ORDER BY g.scheduled_time DESC
+            LIMIT 10 -- Mostramos las últimas 10 partidas, por ejemplo
+        `;
+        const history = await pool.query(query);
+        res.json(history.rows);
+    } catch (error) {
+        console.error('Error al obtener historial de partidas:', error);
+        res.status(500).json({ message: 'Error interno.' });
     }
 });
 
