@@ -46,12 +46,8 @@ const ENTRY_FEE = 10.00; // Costo de entrada a cada partida
 
 // --- Configuración de Mercado Pago ---
 // Crea una instancia del cliente de Mercado Pago con tu Access Token
-const client = new mercadopago.MercadoPagoConfig({
-    accessToken: process.env.MP_ACCESS_TOKEN, // ¡Asegúrate de que este token sea correcto y activo en MP!
-    options: {
-        timeout: 15000, // Timeout para las peticiones (15 segundos)
-    },
-    debug: true, // Habilita el modo debug del SDK para ver más información en consola
+const mpClient = new mercadopago.MercadoPagoConfig({
+    accessToken: process.env.MP_ACCESS_TOKEN,
 });
 // --- Fin Configuración de Mercado Pago ---
 
@@ -389,7 +385,7 @@ app.post('/api/games/:gameId/register', authenticateToken, async (req, res) => {
   notification_url: `${baseUrl}/api/payments/webhook`
 };
         
-        const preference = new mercadopago.Preference(client);
+        const preference = new mercadopago.Preference(mpClient);
         const mpResponse = await preference.create({ body: preferenceBody });
 
         console.log("<-- Respuesta de Mercado Pago:", JSON.stringify(mpResponse, null, 2));
@@ -454,7 +450,7 @@ app.post('/api/payments/webhook', async (req, res) => {
 
 async function processOrderAsApproved(orderId) {
     try {
-        const orderController = new mercadopago.MerchantOrder(client);
+        const orderController = new mercadopago.MerchantOrder(mpClient);
         const order = await orderController.get({ merchantOrderId: orderId });
 
         if (order && order.external_reference) {
