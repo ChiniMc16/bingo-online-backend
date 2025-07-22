@@ -81,47 +81,33 @@ const authenticateToken = (req, res, next) => {
 
 // Función para generar un cartón de bingo (75 bolas)
 function generateBingoCard() {
-    const card = [];
-    const columns = {
-        'B': [], // 1-15
-        'I': [], // 16-30
-        'N': [], // 31-45
-        'G': [], // 46-60
-        'O': []  // 61-75
-    };
-
-    // Rellenar cada columna con 5 números únicos
+    const columns = { 'B': [], 'I': [], 'N': [], 'G': [], 'O': [] };
     function fillColumn(start, end, count) {
-        const numbers = Array.from({ length: end - start + 1 }, (_, i) => start + i); // Array de números posibles
+        const numbers = Array.from({ length: end - start + 1 }, (_, i) => start + i);
         const selected = [];
         for (let i = 0; i < count; i++) {
             const randomIndex = Math.floor(Math.random() * numbers.length);
-            selected.push(numbers.splice(randomIndex, 1)[0]); // Saca el número y lo añade
+            selected.push(numbers.splice(randomIndex, 1)[0]);
         }
-        return selected.sort((a, b) => a - b); // Ordenar para que sea más fácil de leer
+        return selected.sort((a, b) => a - b);
     }
-
     columns['B'] = fillColumn(1, 15, 5);
     columns['I'] = fillColumn(16, 30, 5);
-    columns['N'] = fillColumn(31, 45, 5); // La casilla central se maneja después
+    columns['N'] = fillColumn(31, 45, 5);
     columns['G'] = fillColumn(46, 60, 5);
     columns['O'] = fillColumn(61, 75, 5);
+    columns['N'][2] = 0;
 
-    // La columna 'N' tiene una casilla "GRATIS" (índice 2, el del medio)
-    columns['N'][2] = 0; // Usaremos 0 para representar la casilla gratis
-
-    // Reorganizar en un formato de $5 \times 5$ (para facilidad de almacenamiento/visualización)
+    const card = [];
+    // Aplanamos el cartón
     for (let row = 0; row < 5; row++) {
-        card.push([
-            columns['B'][row],
-            columns['I'][row],
-            columns['N'][row],
-            columns['G'][row],
-            columns['O'][row]
-        ]);
+        card.push(columns['B'][row]);
+        card.push(columns['I'][row]);
+        card.push(columns['N'][row]);
+        card.push(columns['G'][row]);
+        card.push(columns['O'][row]);
     }
-
-    return card; // Retorna un array de arrays representando el cartón
+    return card; // Retorna un array plano de 25 números
 }
 
 // Función para crear las partidas diarias
@@ -542,55 +528,53 @@ io.on('connection', (socket) => {
 
     // Dentro de io.on('connection', ...)
 
-    socket.on('bingo', async (data) => {
-        const { gameId, cardIndex } = data; // Esperamos el ID de la partida y el índice del cartón ganador
+     socket.on('bingo', async () => {
         const userId = socket.user.id;
         const username = socket.user.username;
+        
+        // Buscamos en qué partida está este socket.
+        // Los sockets se unen a salas con el nombre del gameId.
+        const gameId = Array.from(socket.rooms)[1]; // La primera sala es el ID del socket, la segunda es la del juego.
 
-        console.log(`📢 ¡BINGO cantado por ${username} en la partida ${gameId} con el cartón índice ${cardIndex}!`);
-
-        // Verificamos que el juego esté realmente en progreso
-        if (!activeGames[gameId]) {
-            return socket.emit('bingoResult', { valid: false, message: 'La partida no está en curso.' });
+        if (!gameId || !activeGames[gameId]) {
+            return socket.emit('bingoResult', { valid: false, message: 'La partida no está activa.' });
         }
-
+        
+        console.log(`📢 ¡BINGO cantado por ${username} en la partida ${gameId}!`);
+        
         try {
-            // 1. Obtener los cartones del jugador y los números cantados
+            // 1. Obtener los cartones del jugador y los números cantados hasta ahora
             const participantResult = await pool.query(
                 'SELECT card_numbers FROM game_participants WHERE game_id = $1 AND user_id = $2',
                 [gameId, userId]
             );
-
-            if (participantResult.rows.length === 0) {
-                return socket.emit('bingoResult', { valid: false, message: 'No estás participando en esta partida.' });
-            }
+            if (participantResult.rows.length === 0) return; // Seguridad extra
 
             const userCards = participantResult.rows[0].card_numbers;
-            const winningCard = userCards[cardIndex]; // El cartón específico que el jugador dice que ganó
             const calledNumbers = activeGames[gameId].calledNumbers;
-
-            // 2. Función para verificar si el cartón es ganador
-            let isWinner = true;
-            for (const row of winningCard) {
-                for (const number of row) {
-                    if (number !== 0 && !calledNumbers.has(number)) {
-                        isWinner = false; // Si un número del cartón no ha sido cantado, no es ganador
-                        break;
-                    }
-                }
-                if (!isWinner) break;
-            }
             
-            // 3. Responder y finalizar el juego
-            if (isWinner) {
+            // 2. Verificar cada uno de los 5 cartones del jugador
+            let winningCard = null;
+            for (const card of userCards) {
+                if (isCardWinner(card, calledNumbers)) {
+                    winningCard = card;
+                    break; // Encontramos un cartón ganador, no necesitamos seguir buscando
+                }
+            }
+
+            // 3. Responder y finalizar el juego si hay un ganador
+            if (winningCard) {
+                // Notificamos solo al jugador que su BINGO es válido
                 socket.emit('bingoResult', { valid: true, message: '¡Felicidades, has ganado!' });
+                
+                // Finalizamos el juego para todos
                 endGame(gameId, `¡BINGO cantado por ${username}!`, {
                     userId,
                     username,
                     winningCard
                 });
             } else {
-                socket.emit('bingoResult', { valid: false, message: '¡Bingo incorrecto! Sigues en juego.' });
+                socket.emit('bingoResult', { valid: false, message: '¡Bingo incorrecto! Aún te faltan números.' });
             }
 
         } catch (error) {
@@ -598,7 +582,21 @@ io.on('connection', (socket) => {
             socket.emit('bingoResult', { valid: false, message: 'Error del servidor al verificar tu cartón.' });
         }
     });
-});
+
+// --- ¡NUEVA FUNCIÓN AUXILIAR PARA VERIFICAR UN CARTÓN! ---
+// Puedes ponerla junto a tus otras funciones de lógica de juego.
+function isCardWinner(card, calledNumbers) {
+    for (const row of card) {
+        for (const number of row) {
+            // Si un número del cartón (que no sea la casilla gratis) no ha sido cantado, no es un cartón ganador.
+            if (number !== 0 && !calledNumbers.has(number)) {
+                return false;
+            }
+        }
+    }
+    // Si todos los números del cartón han sido cantados, ¡es un ganador!
+    return true;
+}
 
 async function setupInitialGames() {
     const today = DateTime.now().setZone("America/Argentina/Buenos_Aires");
