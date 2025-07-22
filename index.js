@@ -493,88 +493,81 @@ io.on('connection', (socket) => {
     });
 
     socket.on('joinGame', async (gameId) => {
-    socket.join(String(gameId));
-    console.log(`Usuario ${socket.user.username} se unió al juego ${gameId}`);
-    socket.emit('gameStatus', { message: `¡Bienvenido al juego ${gameId}!` });
+        socket.join(String(gameId));
+        console.log(`Usuario ${socket.user.username} se unió al juego ${gameId}`);
+        socket.emit('gameStatus', { message: `¡Bienvenido al juego ${gameId}!` });
 
-    try {
-        const userId = socket.user.id; 
-        const result = await pool.query(
-            'SELECT card_numbers FROM game_participants WHERE game_id = $1 AND user_id = $2 AND payment_status = \'APPROVED\'',
-            [gameId, userId]
-        );
+        try {
+            const userId = socket.user.id; 
+            const result = await pool.query(
+                'SELECT card_numbers FROM game_participants WHERE game_id = $1 AND user_id = $2 AND payment_status = \'APPROVED\'',
+                [gameId, userId]
+            );
 
-        if (result.rows.length > 0) {
-            const cardsJsonString = result.rows[0].card_numbers; // Sigue siendo un string
+            if (result.rows.length > 0) {
+                const cardsJsonString = result.rows[0].card_numbers;
+                const parsedCards = JSON.parse(cardsJsonString);
 
-            // --- ¡AQUÍ ESTÁ LA CORRECCIÓN CLAVE! ---
-            // Parseamos el string a un objeto/array de JavaScript ANTES de enviarlo.
-            const parsedCards = JSON.parse(cardsJsonString);
-
-            // Ahora enviamos el objeto parseado.
-            socket.emit("yourCards", {
-                cards: parsedCards  // 👈 Enviá el array directamente, SIN JSON.stringify
-            });
-            
-            console.log(`Cartones enviados al usuario ${socket.user.username} para la partida ${gameId}`);
-        } else {
-            socket.emit('gameError', { message: 'No se encontraron tus cartones para esta partida (pago no confirmado).' });
-        }
+                socket.emit("yourCards", { cards: parsedCards });
+                
+                console.log(`Cartones enviados al usuario ${socket.user.username} para la partida ${gameId}`);
+            } else {
+                socket.emit('gameError', { message: 'No se encontraron tus cartones para esta partida (pago no confirmado).' });
+            }
         } catch (error) {
             console.error('Error al obtener los cartones del usuario:', error);
             socket.emit('gameError', { message: 'Error al obtener tus cartones.' });
         }
     });
 
-    // Dentro de io.on('connection', ...)
-
-     socket.on('bingo', async () => {
+    socket.on('bingo', async (data) => {
+        // Asumimos que la app no envía 'cardIndex' por ahora, así que verificamos todos los cartones.
+        const { gameId } = data; 
         const userId = socket.user.id;
         const username = socket.user.username;
-        
-        // Buscamos en qué partida está este socket.
-        // Los sockets se unen a salas con el nombre del gameId.
-        const gameId = Array.from(socket.rooms)[1]; // La primera sala es el ID del socket, la segunda es la del juego.
 
-        if (!gameId || !activeGames[gameId]) {
-            return socket.emit('bingoResult', { valid: false, message: 'La partida no está activa.' });
-        }
-        
         console.log(`📢 ¡BINGO cantado por ${username} en la partida ${gameId}!`);
-        
+
+        // Verificamos que el juego esté realmente en progreso
+        if (!activeGames[gameId]) {
+            return socket.emit('bingoResult', { valid: false, message: 'La partida no está en curso.' });
+        }
+
         try {
-            // 1. Obtener los cartones del jugador y los números cantados hasta ahora
+            // 1. Obtener los cartones del jugador y los números cantados
             const participantResult = await pool.query(
                 'SELECT card_numbers FROM game_participants WHERE game_id = $1 AND user_id = $2',
                 [gameId, userId]
             );
-            if (participantResult.rows.length === 0) return; // Seguridad extra
 
+            if (participantResult.rows.length === 0) {
+                return socket.emit('bingoResult', { valid: false, message: 'No estás participando en esta partida.' });
+            }
+
+            // userCards es un array de 5 cartones. Cada cartón es un array de 5 filas.
             const userCards = participantResult.rows[0].card_numbers;
             const calledNumbers = activeGames[gameId].calledNumbers;
             
-            // 2. Verificar cada uno de los 5 cartones del jugador
             let winningCard = null;
+            // 2. Verificar cada uno de los 5 cartones del jugador
             for (const card of userCards) {
-                if (isCardWinner(card, calledNumbers)) {
+                // Llamamos a la función auxiliar que ahora está en el scope correcto
+                if (isCardWinner(card, calledNumbers)) { 
                     winningCard = card;
-                    break; // Encontramos un cartón ganador, no necesitamos seguir buscando
+                    break; // Encontramos un cartón ganador
                 }
             }
-
+            
             // 3. Responder y finalizar el juego si hay un ganador
             if (winningCard) {
-                // Notificamos solo al jugador que su BINGO es válido
                 socket.emit('bingoResult', { valid: true, message: '¡Felicidades, has ganado!' });
-                
-                // Finalizamos el juego para todos
                 endGame(gameId, `¡BINGO cantado por ${username}!`, {
                     userId,
                     username,
                     winningCard
                 });
             } else {
-                socket.emit('bingoResult', { valid: false, message: '¡Bingo incorrecto! Aún te faltan números.' });
+                socket.emit('bingoResult', { valid: false, message: '¡Bingo incorrecto! Sigues en juego.' });
             }
 
         } catch (error) {
@@ -582,6 +575,7 @@ io.on('connection', (socket) => {
             socket.emit('bingoResult', { valid: false, message: 'Error del servidor al verificar tu cartón.' });
         }
     });
+});
 
 // --- ¡NUEVA FUNCIÓN AUXILIAR PARA VERIFICAR UN CARTÓN! ---
 // Puedes ponerla junto a tus otras funciones de lógica de juego.
