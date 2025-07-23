@@ -723,26 +723,61 @@ cron.schedule('* * * * *', async () => {
     }
 });
 
+// Tarea para finalizar partidas "atascadas" que deberían haber terminado
+cron.schedule('*/5 * * * *', async () => { // Se ejecuta cada 5 minutos
+    console.log('Cron: Verificando partidas atascadas en IN_PROGRESS...');
+    try {
+        // Busca partidas que empezaron hace más de, por ejemplo, 2 horas
+        const twoHoursAgo = DateTime.now().minus({ hours: 2 }).toJSDate();
+        const result = await pool.query(
+            "SELECT id FROM games WHERE status = 'IN_PROGRESS' AND scheduled_time < $1",
+            [twoHoursAgo]
+        );
+
+        for (const game of result.rows) {
+            console.log(`Partida ${game.id} está atascada. Finalizando automáticamente.`);
+            // Llama a tu función endGame sin un ganador específico
+            endGame(game.id, "Partida finalizada por tiempo.");
+        }
+    } catch (error) {
+        console.error('Cron: Error al verificar partidas atascadas:', error);
+    }
+});
+
 // Tarea para limpiar partidas viejas
 cron.schedule('5 3 * * *', async () => { // Todos los días a las 3:05 AM
-    console.log('Cron: Limpiando partidas antiguas...');
+    console.log('Cron: Limpiando partidas antiguas (más de 24h)...');
     try {
-        // Borra participantes y luego partidas que terminaron hace más de 24 horas
         const cutoffDate = DateTime.now().minus({ hours: 24 }).toJSDate();
         
-        // Primero borramos los participantes para evitar violaciones de clave foránea
-        await pool.query(
-            `DELETE FROM game_participants 
-             WHERE game_id IN (SELECT id FROM games WHERE status = 'FINISHED' AND updated_at < $1)`,
+        // Obtenemos los IDs de las partidas a borrar
+        const gamesToDelete = await pool.query(
+            "SELECT id FROM games WHERE status = 'FINISHED' AND updated_at < $1",
             [cutoffDate]
         );
         
-        // Luego borramos las partidas
-        const result = await pool.query(
-            "DELETE FROM games WHERE status = 'FINISHED' AND updated_at < $1",
-            [cutoffDate]
+        if (gamesToDelete.rows.length === 0) {
+            console.log("Cron: No hay partidas antiguas para borrar.");
+            return;
+        }
+
+        const gameIds = gamesToDelete.rows.map(row => row.id);
+        
+        // Borramos los participantes de esas partidas
+        console.log(`Cron: Borrando participantes de las partidas: ${gameIds.join(', ')}`);
+        await pool.query(
+            `DELETE FROM game_participants WHERE game_id = ANY($1::int[])`,
+            [gameIds]
         );
+        
+        // Borramos las partidas
+        const result = await pool.query(
+            "DELETE FROM games WHERE id = ANY($1::int[])",
+            [gameIds]
+        );
+
         console.log(`Cron: ${result.rowCount} partidas antiguas han sido borradas.`);
+
     } catch (error) {
         console.error('Cron: Error al limpiar partidas antiguas:', error);
     }
