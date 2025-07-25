@@ -598,6 +598,14 @@ io.on('connection', (socket) => {
             socket.emit('bingoResult', { valid: false, message: 'Error del servidor al verificar tu cartón.' });
         }
     });
+
+    socket.on('requestPlayerCount', (gameId) => {
+        const room = io.sockets.adapter.rooms.get(String(gameId));
+        const playerCount = room ? room.size : 0;
+        // Le respondemos SOLO a quien preguntó
+        socket.emit('playerCountUpdate', { count: playerCount });
+    });
+    
 });
 // --- ¡NUEVA FUNCIÓN AUXILIAR PARA VERIFICAR UN CARTÓN! ---
 // Puedes ponerla junto a tus otras funciones de lógica de juego.
